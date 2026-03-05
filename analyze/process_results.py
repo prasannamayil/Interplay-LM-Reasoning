@@ -19,6 +19,7 @@ import pandas as pd
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results" / "gsm_infinity_rl"
+RESULTS_DIR_V3 = Path(__file__).resolve().parent.parent / "results" / "gsm_infinity_rl_v3"
 
 PASS_K_VALUES = [1, 2, 4, 8, 16, 32, 64, 128]
 
@@ -82,6 +83,19 @@ ALL_RUNS = [
     "grpo_rup_strong_mixed_v2",
 ]
 
+# v3 runs (2 epochs, method variants on edge+hard)
+ALL_RUNS_V3 = [
+    "base_model_eval_skewed_pass128",
+    # GRPO v3 (2 epochs)
+    "grpo_id_v3", "grpo_edge_v3", "grpo_hard_v3", "grpo_mixed_v3",
+    # Method variants (edge + hard only)
+    "grpo_clip_cov_edge_v3", "grpo_clip_cov_hard_v3",
+    "grpo_kl_cov_edge_v3", "grpo_kl_cov_hard_v3",
+    "grpo_ent_cov_edge_v3", "grpo_ent_cov_hard_v3",
+    "grpo_mgpo_edge_v3", "grpo_mgpo_hard_v3",
+    "grpo_rup_edge_v3", "grpo_rup_hard_v3",
+]
+
 # Nice display names
 DISPLAY_NAMES = {
     "base_model_eval_pass128": "Base",
@@ -124,6 +138,21 @@ DISPLAY_NAMES = {
     "grpo_rup_strong_edge_v2": "GRPO+RUP-5x (Edge)",
     "grpo_rup_strong_hard_v2": "GRPO+RUP-5x (Hard)",
     "grpo_rup_strong_mixed_v2": "GRPO+RUP-5x (Mixed)",
+    # v3 runs
+    "grpo_id_v3": "GRPO-v3 (ID)",
+    "grpo_edge_v3": "GRPO-v3 (Edge)",
+    "grpo_hard_v3": "GRPO-v3 (Hard)",
+    "grpo_mixed_v3": "GRPO-v3 (Mixed)",
+    "grpo_clip_cov_edge_v3": "GRPO+ClipCov (Edge)",
+    "grpo_clip_cov_hard_v3": "GRPO+ClipCov (Hard)",
+    "grpo_kl_cov_edge_v3": "GRPO+KLCov (Edge)",
+    "grpo_kl_cov_hard_v3": "GRPO+KLCov (Hard)",
+    "grpo_ent_cov_edge_v3": "GRPO+EntCov (Edge)",
+    "grpo_ent_cov_hard_v3": "GRPO+EntCov (Hard)",
+    "grpo_mgpo_edge_v3": "GRPO+MGPO (Edge)",
+    "grpo_mgpo_hard_v3": "GRPO+MGPO (Hard)",
+    "grpo_rup_edge_v3": "GRPO+RUP (Edge)",
+    "grpo_rup_hard_v3": "GRPO+RUP (Hard)",
 }
 
 # Training data regimes
@@ -160,6 +189,21 @@ DATA_REGIMES = {
     "grpo_rup_strong_edge_v2": "edge",
     "grpo_rup_strong_hard_v2": "hard",
     "grpo_rup_strong_mixed_v2": "mixed",
+    # v3 runs
+    "grpo_id_v3": "id",
+    "grpo_edge_v3": "edge",
+    "grpo_hard_v3": "hard",
+    "grpo_mixed_v3": "mixed",
+    "grpo_clip_cov_edge_v3": "edge",
+    "grpo_clip_cov_hard_v3": "hard",
+    "grpo_kl_cov_edge_v3": "edge",
+    "grpo_kl_cov_hard_v3": "hard",
+    "grpo_ent_cov_edge_v3": "edge",
+    "grpo_ent_cov_hard_v3": "hard",
+    "grpo_mgpo_edge_v3": "edge",
+    "grpo_mgpo_hard_v3": "hard",
+    "grpo_rup_edge_v3": "edge",
+    "grpo_rup_hard_v3": "hard",
 }
 
 # Training data op ranges for labels
@@ -180,7 +224,20 @@ _V2_EVAL_RUNS = {
     "grpo_rup_strong_mixed_v2",
 }
 
+_V3_EVAL_RUNS = set(ALL_RUNS_V3) - {"base_model_eval_skewed_pass128"}
+
 _BASE_MODEL_RUNS = {"base_model_eval_pass128", "base_model_eval_skewed_pass128"}
+
+
+def _get_results_dir(run_name: str) -> Path:
+    """Return the correct results directory for a run."""
+    if run_name in _V3_EVAL_RUNS:
+        return RESULTS_DIR_V3
+    if run_name == "base_model_eval_skewed_pass128":
+        v3_path = RESULTS_DIR_V3 / run_name / "metrics.jsonl"
+        if v3_path.exists():
+            return RESULTS_DIR_V3
+    return RESULTS_DIR
 
 
 def _load_metrics_at_step(run_name: str, step: Optional[int] = None) -> dict:
@@ -188,10 +245,10 @@ def _load_metrics_at_step(run_name: str, step: Optional[int] = None) -> dict:
     Load validation metrics for a run at a given step.
 
     - base_model_eval_*: reads first line of its metrics.jsonl
-    - v2 runs: reads eval_pass128/metrics.jsonl under the final checkpoint
+    - v2/v3 runs: reads eval_pass128/metrics.jsonl under the final checkpoint
     - legacy runs: reads root metrics.jsonl and finds the entry at `step`
     """
-    run_dir = RESULTS_DIR / run_name
+    run_dir = _get_results_dir(run_name) / run_name
 
     if run_name in _BASE_MODEL_RUNS:
         metrics_path = run_dir / "metrics.jsonl"
@@ -204,7 +261,7 @@ def _load_metrics_at_step(run_name: str, step: Optional[int] = None) -> dict:
         iter_file = run_dir / "latest_checkpointed_iteration.txt"
         step = int(iter_file.read_text().strip())
 
-    if run_name in _V2_EVAL_RUNS:
+    if run_name in _V2_EVAL_RUNS or run_name in _V3_EVAL_RUNS:
         eval_metrics = run_dir / f"global_step_{step}" / "eval_pass128" / "metrics.jsonl"
         if eval_metrics.exists():
             with open(eval_metrics) as f:
@@ -348,10 +405,10 @@ def summary_table(
 
 def get_available_steps(run_name: str) -> list[int]:
     """Get all steps that have pass@k metrics for a run."""
-    if run_name == "base_model_eval_pass128":
+    if run_name in _BASE_MODEL_RUNS:
         return [0]
 
-    run_dir = RESULTS_DIR / run_name
+    run_dir = _get_results_dir(run_name) / run_name
     metrics_path = run_dir / "metrics.jsonl"
     steps = []
     with open(metrics_path) as f:
