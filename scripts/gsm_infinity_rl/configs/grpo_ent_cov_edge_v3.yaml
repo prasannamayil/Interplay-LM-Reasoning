@@ -68,8 +68,7 @@ actor_rollout_ref:
       loss_mode: ent_cov
       ent_cov_alpha: 0.15
       ent_cov_alpha_end: 0.0
-      ent_cov_schedule: cosine
-      ent_cov_warmup_ratio: 0.1
+      ent_cov_alpha_schedule: cosine
       ent_cov_delta_h_tgt: 0.0
       ent_cov_eta: 1.0
       ent_cov_lambda_clip: 5.0
