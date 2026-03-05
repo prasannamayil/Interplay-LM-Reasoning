@@ -1,11 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# Node B: GRPO+RUP v2 (id, edge, hard, mixed)
+# Node A2: GRPO v2 (hard, mixed)
 # Train with outcome reward, eval with process-verified reward
 #
-# Training runs sequentially, then all 4 models are evaluated at the end.
-#
-# Usage: bash scripts/gsm_infinity_rl/run_v2_node_B.sh
+# Usage: bash scripts/gsm_infinity_rl/run_v2_node_A2.sh
 # =============================================================================
 
 set -e
@@ -19,6 +17,7 @@ cd "$PROJECT_ROOT"
 
 TOTAL_START=$(date +%s)
 
+# ─── Helper: train one run (no eval) ───────────────────────────────────────
 run_training() {
     local CFG="$1"
     local RUN="$2"
@@ -38,19 +37,17 @@ run_training() {
     echo "[${IDX}/${TOTAL}] Training complete: ${RUN}"
 }
 
-# ─── Step 1-4: GRPO+RUP v2 training runs ──────────────────────────────────
-run_training "grpo_rup_id_v2"    "grpo_rup_id_v2"    "1" "4"
-run_training "grpo_rup_edge_v2"  "grpo_rup_edge_v2"  "2" "4"
-run_training "grpo_rup_hard_v2"  "grpo_rup_hard_v2"  "3" "4"
-run_training "grpo_rup_mixed_v2" "grpo_rup_mixed_v2" "4" "4"
+# ─── Step 1-2: GRPO v2 training runs ──────────────────────────────────────
+run_training "grpo_hard_v2"  "grpo_hard_v2"  "1" "2"
+run_training "grpo_mixed_v2" "grpo_mixed_v2" "2" "2"
 
-# ─── Step 5: Evaluate all 4 models (process-verified pass@128) ────────────
+# ─── Step 3: Evaluate both models (process-verified pass@128) ─────────────
 echo ""
 echo "================================================================"
-echo "[5/5] Evaluating all 4 GRPO+RUP v2 checkpoints (process-verified)"
+echo "[3/3] Evaluating GRPO v2 checkpoints (process-verified)"
 echo "================================================================"
 bash scripts/gsm_infinity_rl/eval_final_v2_process.sh \
-    grpo_rup_id_v2 grpo_rup_edge_v2 grpo_rup_hard_v2 grpo_rup_mixed_v2
+    grpo_hard_v2 grpo_mixed_v2
 
 TOTAL_END=$(date +%s)
 TOTAL_DURATION=$(( TOTAL_END - TOTAL_START ))
@@ -59,11 +56,9 @@ MINS=$(( (TOTAL_DURATION % 3600) / 60 ))
 
 echo ""
 echo "================================================================"
-echo "Node B complete! Total wall time: ${HOURS}h ${MINS}m"
+echo "Node A2 complete! Total wall time: ${HOURS}h ${MINS}m"
 echo "================================================================"
 echo "Runs completed:"
-echo "  - grpo_rup_id_v2 (train + eval)"
-echo "  - grpo_rup_edge_v2 (train + eval)"
-echo "  - grpo_rup_hard_v2 (train + eval)"
-echo "  - grpo_rup_mixed_v2 (train + eval)"
+echo "  - grpo_hard_v2 (train + eval)"
+echo "  - grpo_mixed_v2 (train + eval)"
 echo "================================================================"
