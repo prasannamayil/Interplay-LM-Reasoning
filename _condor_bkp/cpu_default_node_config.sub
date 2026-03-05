@@ -1,0 +1,30 @@
+executable = /bin/bash
+
+# LOGS
+error  = /fast/bthambiraja/projects/LLM-Interplay/logs_condor/$(ClusterId).$(ProcId).err
+output = /fast/bthambiraja/projects/LLM-Interplay/logs_condor/$(ClusterId).$(ProcId).out
+log    = /fast/bthambiraja/projects/LLM-Interplay/logs_condor/$(ClusterId).$(ProcId).log
+
+# CPU / MEMORY
+request_memory = 32000
+request_cpus = 4
+
+# EXIT SETTINGS
+on_exit_hold = (ExitCode =?= 3)
+on_exit_hold_reason = "Checkpointed, will resume"
+on_exit_hold_subcode = 2
+periodic_release = ( (JobStatus =?= 5) && (HoldReasonCode =?= 3) && (HoldReasonSubCode =?= 2) )
+
+# Retry this job 5 times if non-zero exit code
+# max_retries = 1
+
+# max running price
+# https://atlas.is.localnet/confluence/display/IT/Limit+the+running+price+of+a+job
++MaxRunningPrice = 5000
+#+RunningPriceExceededAction = "restart"
++RunningPriceExceededAction = "kill"
+
+# https://atlas.is.localnet/confluence/display/IT/How+to+limit+the+running+time+of+a+job+in+the+cluster
+
+# add to job to queue
+queue

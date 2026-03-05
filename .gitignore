@@ -38,6 +38,11 @@ main_ppo.log
 
 # gsm_pretrain
 gsm_pretrain/
+fast_results
+gsm_pretrain/**/*
+dllm/model_configs
+dllm/model_configs
+gsm_pretrain
 
 # IDE
 .idea/

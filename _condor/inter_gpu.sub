@@ -1,0 +1,32 @@
+
+executable = /bin/bash
+
+# CPU / MEMORY
+request_cpus = 64
+request_memory = 500G
+request_disk = 1000G
+
+# GPU
+request_gpus = 1
+requirements = (TARGET.CUDAGlobalMemoryMb > 41000 ) && (TARGET.CUDAGlobalMemoryMb < 84000) && (UtsnameNodename =!= "i103")
+
+# LOGS
+### while change this path later
+error  = /fast/bthambiraja/projects/LLMInterplay/logs_condor/$(ClusterId).$(ProcId).err
+output = /fast/bthambiraja/projects/LLMInterplay/logs_condor/$(ClusterId).$(ProcId).out
+log    = /fast/bthambiraja/projects/LLMInterplay/logs_condor/$(ClusterId).$(ProcId).log
+
+# EXIT SETTINGS
+on_exit_hold = (ExitCode =?= 3)
+on_exit_hold_reason = "Checkpointed, will resume"
+on_exit_hold_subcode = 2
+periodic_release = ( (JobStatus =?= 5) && (HoldReasonCode =?= 3) && (HoldReasonSubCode =?= 2) )
+
+# Retry this job 5 times if non-zero exit code
+# max_retries = 1
+
+# max running price
++MaxRunningPrice = 5000
++RunningPriceExceededAction = "kill"
+# add to job to queue
+queue

@@ -42,7 +42,7 @@ BLOCK_SIZE_BD3LM="${BLOCK_SIZE_BD3LM:-16}"
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="${PROJECT_ROOT:-/home/bthambiraja/projects/Interplay-LM-Reasoning}"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
 VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
 TEST_DIR="${PROJECT_ROOT}/data/composition_hf/test_small"
@@ -63,9 +63,13 @@ echo "Steps:           ${STEPS}"
 echo "BD3LM block_size: ${BLOCK_SIZE_BD3LM}"
 echo "=============================================="
 
-source "${VENV}"
-export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
+# source "${VENV}"
+# export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
 cd "${DLLM_ROOT}"
+
+# Trim leading/trailing whitespace (guards against accidental trailing space after \ in caller)
+MODEL_PATH="${MODEL_PATH#"${MODEL_PATH%%[![:space:]]*}"}"
+MODEL_PATH="${MODEL_PATH%"${MODEL_PATH##*[![:space:]]}"}"
 
 # Resolve relative model paths
 if [[ ! "${MODEL_PATH}" = /* ]]; then

@@ -55,7 +55,7 @@ def get_model(
         )
 
     params = {
-        "dtype": dtype,
+        "torch_dtype": dtype,
         "device_map": device_map,
         "quantization_config": quant_config,
         "attn_implementation": attn_implementation,

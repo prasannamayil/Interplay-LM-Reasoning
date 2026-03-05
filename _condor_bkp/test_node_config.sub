@@ -1,0 +1,37 @@
+executable = /bin/bash
+
+# LOGS
+error  = ./logs_condor/$(ClusterId).$(ProcId).err
+output = ./logs_condor/$(ClusterId).$(ProcId).out
+log    = ./logs_condor/$(ClusterId).$(ProcId).log
+
+# CPU / MEMORY
+request_memory = 64000
+request_cpus = 1
+
+# GPU
+request_gpus = 1
+#requirements = (TARGET.CUDAGlobalMemoryMb > 25000) &&  (TARGET.CUDAGlobalMemoryMb < 40000)
+# && UtsnameNodename =!= "g041" && UtsnameNodename =!= "g028"
+# requirements = (TARGET.CUDAGlobalMemoryMb > 25000) &&  (TARGET.CUDAGlobalMemoryMb < 40000)
+requirements = (TARGET.CUDAGlobalMemoryMb > 23000) &&  (TARGET.CUDAGlobalMemoryMb < 40000) && UtsnameNodename =!= "g035"
+
+# EXIT SETTINGS
+on_exit_hold = (ExitCode =?= 3)
+on_exit_hold_reason = "Checkpointed, will resume"
+on_exit_hold_subcode = 2
+periodic_release = ( (JobStatus =?= 5) && (HoldReasonCode =?= 3) && (HoldReasonSubCode =?= 2) )
+
+# Retry this job 5 times if non-zero exit code
+# max_retries = 1
+
+# max running price
+# https://atlas.is.localnet/confluence/display/IT/Limit+the+running+price+of+a+job
++MaxRunningPrice = 5000
+#+RunningPriceExceededAction = "restart"
++RunningPriceExceededAction = "kill"
+
+# https://atlas.is.localnet/confluence/display/IT/How+to+limit+the+running+time+of+a+job+in+the+cluster
+
+# add to job to queue
+queue

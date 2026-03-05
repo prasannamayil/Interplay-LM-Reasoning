@@ -1,0 +1,39 @@
+executable = /usr/bin/apptainer
+CmdLine = <<job_command>>
+arguments = exec --no-home --contain --writable-tmpfs --nv --bind /usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --bind /usr/lib64:/usr/lib64 --bind /home/bthambiraja/projects/btraja-internship/external_repo:/home/bthambiraja/projects/btraja-internship/external_repo --bind /is/cluster/fast/bthambiraja/projects/btraja-internship/assets:/home/bthambiraja/projects/btraja-internship/assets --bind /is/cluster/fast/bthambiraja/projects/datasets:/home/bthambiraja/projects/datasets --bind /is/cluster/fast/bthambiraja/projects/btraja-internship/dump:/home/bthambiraja/projects/btraja-internship/dump --bind /is/cluster/fast/bthambiraja/tmp/:/tmp <<apptainer_img>> /bin/bash $(CmdLine)
+
+
+# LOGS
+error  = /fast/bthambiraja/projects/motion_root/logs_condor/$(ClusterId).$(ProcId).err
+output = /fast/bthambiraja/projects/motion_root/logs_condor/$(ClusterId).$(ProcId).out
+log    = /fast/bthambiraja/projects/motion_root/logs_condor/$(ClusterId).$(ProcId).log
+
+# CPU / MEMORY
+request_memory = n_ram
+request_cpus = n_cpus
+request_disk = n_diskG
+
+# GPU
+request_gpus = n_gpus
+requirements = (TARGET.CUDAGlobalMemoryMb > min_gpu_mem ) && (TARGET.CUDAGlobalMemoryMb < <<max_gpu_mem>>)
+
+# EXIT SETTINGS
+on_exit_hold = (ExitCode =?= 3)
+on_exit_hold_reason = "Checkpointed, will resume"
+on_exit_hold_subcode = 2
+periodic_release = ( (JobStatus =?= 5) && (HoldReasonCode =?= 3) && (HoldReasonSubCode =?= 2) )
+
+# Retry this job 5 times if non-zero exit code
+# max_retries = 1
+
+# max running price
++MaxRunningPrice = 5000
++RunningPriceExceededAction = "kill"
+# add to job to queue
+queue
+
+
+###### references
+
+# CmdLine = /home/bthambiraja/projects/btraja-internship/external_repo/hands_only/train/mgpt_train_job.sh /home/bthambiraja/projects/btraja-internship/external_repo/hands_only/llm/MotionGPT train.py /home/bthambiraja/projects/btraja-internship/external_repo/hands_only/_config/baselines/mgpt_mdm_00_train/mgptmdm_01_condor_test.yaml
+# arguments = exec --no-home --contain --writable-tmpfs --nv --bind /usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --bind /usr/lib64:/usr/lib64 --bind /home/bthambiraja/projects/btraja-internship/external_repo:/home/bthambiraja/projects/btraja-internship/external_repo --bind /is/cluster/fast/bthambiraja/projects/btraja-internship/assets:/home/bthambiraja/projects/btraja-internship/assets --bind /is/cluster/fast/bthambiraja/projects/datasets:/home/bthambiraja/projects/datasets --bind /is/cluster/fast/bthambiraja/projects/btraja-internship/dump:/home/bthambiraja/projects/btraja-internship/dump --bind /is/cluster/fast/bthambiraja/tmp/:/tmp <<hoigpt_docker_gl_v4_latest.sif>> /bin/bash $(CmdLine)
