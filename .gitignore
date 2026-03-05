@@ -49,3 +49,4 @@ gsm_pretrain/
 .DS_Store
 Thumbs.db
 
+**/__pycache__/
