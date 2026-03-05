@@ -324,6 +324,13 @@ def get_all_runs_data(
 
     all_data = {}
     for run_name in run_names:
+        # Check if run exists before trying to load (to avoid ugly errors for pending runs)
+        run_dir = _get_results_dir(run_name) / run_name
+        if run_name not in _BASE_MODEL_RUNS:
+            if not (run_dir / "latest_checkpointed_iteration.txt").exists():
+                # print(f"Info: Run {run_name} not started yet (no checkpoint), skipping.")
+                continue
+
         try:
             all_data[run_name] = get_pass_at_k_for_run(run_name, step)
         except Exception as e:
