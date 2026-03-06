@@ -259,9 +259,13 @@ def merge_op_counts(dicts: List[Dict[str, Dict[str, int]]]) -> Dict[str, Dict[st
 
 def _aggregate_pass_counts(
     examples: List[Dict[str, Any]], *, key_prefix: str = ""
-) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Dict[str, Tuple[int, int]]]]:
+) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Dict[str, Tuple[int, int]]], Dict[str, List[Tuple[int, str]]], Dict[str, Dict[str, List[Tuple[int, str]]]]]:
     overall: Dict[str, List[int]] = defaultdict(list)
     per_op: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
+    
+    overall_answers: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+    per_op_answers: Dict[str, Dict[str, List[Tuple[int, str]]]] = defaultdict(lambda: defaultdict(list))
+    
     prefix = key_prefix or ""
     for record in examples:
         idx = record.get("__idx")
@@ -273,16 +277,76 @@ def _aggregate_pass_counts(
             em = int(em_val)
         except Exception:
             continue
+            
+        gen_answer = str(record.get("gen_answer", "")).strip()
+            
         overall[key].append(em)
+        overall_answers[key].append((em, gen_answer))
+        
         op = str(record.get("op", "unknown"))
         per_op[op][key].append(em)
+        per_op_answers[op][key].append((em, gen_answer))
 
     counts = {k: (len(vals), sum(vals)) for k, vals in overall.items() if vals}
     per_op_counts: Dict[str, Dict[str, Tuple[int, int]]] = {}
     for op, idx_map in per_op.items():
         per_op_counts[op] = {k: (len(vals), sum(vals)) for k, vals in idx_map.items() if vals}
-    return counts, per_op_counts
+    return counts, per_op_counts, overall_answers, per_op_answers
 
+import collections
+import random
+
+def _compute_maj_series(answers_map: Dict[str, List[Tuple[int, str]]], max_k: Optional[int]) -> Dict[int, float]:
+    if not answers_map:
+        return {}
+    
+    max_samples = max(len(vals) for vals in answers_map.values())
+    ks = _build_k_values(max_samples, max_k)
+    
+    results: Dict[int, float] = {}
+    for k in ks:
+        total_score = 0.0
+        eligible_count = 0
+        
+        for key, vals in answers_map.items():
+            if len(vals) < k:
+                continue
+            
+            eligible_count += 1
+            
+            num_samples = 100 # empirical trials
+            correct_trials = 0
+            for _ in range(num_samples):
+                subset = random.sample(vals, k)
+                freqs = collections.Counter(ans for em, ans in subset)
+                if not freqs:
+                    continue
+                most_common = freqs.most_common()
+                max_count = most_common[0][1]
+                top_answers = [ans for ans, count in most_common if count == max_count]
+                chosen_ans = random.choice(top_answers)
+                
+                is_correct = any(em == 1 for em, ans in subset if ans == chosen_ans)
+                if is_correct:
+                    correct_trials += 1
+                    
+            total_score += (correct_trials / num_samples)
+            
+        if eligible_count > 0:
+            results[k] = total_score / eligible_count
+        else:
+            results[k] = 0.0
+            
+    return results
+
+def _compute_avg_correct_ratio(counts: Iterable[Tuple[int, int]]) -> float:
+    ratios = [s / n for n, s in counts if n > 0]
+    if not ratios:
+        return 0.0
+    return sum(ratios) / len(ratios)
+
+def _format_maj(series: Dict[int, float]) -> Dict[str, float]:
+    return {f"maj@{k}": float(v) for k, v in sorted(series.items())}
 
 def _pass_probability(n: int, successes: int, k: int) -> float:
     if k <= 0 or n < k or successes <= 0:
@@ -1584,11 +1648,16 @@ def main():
             id_examples_all_sorted = sort_by_idx(id_examples_all)
             ood_examples_all_sorted = sort_by_idx(ood_examples_all)
 
-            id_counts, id_per_op_counts = _aggregate_pass_counts(id_examples_all_sorted, key_prefix="id:")
-            ood_counts, ood_per_op_counts = _aggregate_pass_counts(ood_examples_all_sorted, key_prefix="ood:")
+            id_counts, id_per_op_counts, id_answers, id_per_op_answers = _aggregate_pass_counts(id_examples_all_sorted, key_prefix="id:")
+            ood_counts, ood_per_op_counts, ood_answers, ood_per_op_answers = _aggregate_pass_counts(ood_examples_all_sorted, key_prefix="ood:")
 
             id_pass_series = _compute_pass_series(id_counts.values(), args.sample_k)
             ood_pass_series = _compute_pass_series(ood_counts.values(), args.sample_k)
+            id_maj_series = _compute_maj_series(id_answers, args.sample_k)
+            ood_maj_series = _compute_maj_series(ood_answers, args.sample_k)
+            
+            id_avg_correct_ratio = _compute_avg_correct_ratio(id_counts.values())
+            ood_avg_correct_ratio = _compute_avg_correct_ratio(ood_counts.values())
 
             id_per_op_pass_series = {
                 op: _compute_pass_series(op_counts.values(), args.sample_k)
@@ -1598,15 +1667,49 @@ def main():
                 op: _compute_pass_series(op_counts.values(), args.sample_k)
                 for op, op_counts in ood_per_op_counts.items()
             }
+            id_per_op_maj_series = {
+                op: _compute_maj_series(op_answers, args.sample_k)
+                for op, op_answers in id_per_op_answers.items()
+            }
+            ood_per_op_maj_series = {
+                op: _compute_maj_series(op_answers, args.sample_k)
+                for op, op_answers in ood_per_op_answers.items()
+            }
+            id_per_op_avg_correct_ratio = {
+                op: _compute_avg_correct_ratio(op_counts.values())
+                for op, op_counts in id_per_op_counts.items()
+            }
+            ood_per_op_avg_correct_ratio = {
+                op: _compute_avg_correct_ratio(op_counts.values())
+                for op, op_counts in ood_per_op_counts.items()
+            }
 
             total_counts = {**id_counts, **ood_counts}
+            total_answers = {**id_answers, **ood_answers}
             total_per_op_count_map: Dict[str, Dict[str, Tuple[int, int]]] = {}
             for src in (id_per_op_counts, ood_per_op_counts):
                 for op, op_counts in src.items():
                     total_per_op_count_map.setdefault(op, {}).update(op_counts)
+            
+            total_per_op_answers_map: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
+            for src in (id_per_op_answers, ood_per_op_answers):
+                for op, op_ans in src.items():
+                    total_per_op_answers_map.setdefault(op, {}).update(op_ans)
+                    
             total_pass_series = _compute_pass_series(total_counts.values(), args.sample_k)
+            total_maj_series = _compute_maj_series(total_answers, args.sample_k)
+            total_avg_correct_ratio = _compute_avg_correct_ratio(total_counts.values())
+            
             total_per_op_pass_series = {
                 op: _compute_pass_series(op_counts.values(), args.sample_k)
+                for op, op_counts in total_per_op_count_map.items()
+            }
+            total_per_op_maj_series = {
+                op: _compute_maj_series(op_ans, args.sample_k)
+                for op, op_ans in total_per_op_answers_map.items()
+            }
+            total_per_op_avg_correct_ratio = {
+                op: _compute_avg_correct_ratio(op_counts.values())
                 for op, op_counts in total_per_op_count_map.items()
             }
 
@@ -1660,12 +1763,16 @@ def main():
                 "checkpoint": ck.name,
                 "id": {
                     "answer_accuracy": id_acc,
+                    "avg_correct_ratio": id_avg_correct_ratio,
                     "avg_response_len": id_avg_resp_len,
                     "avg_loss": id_avg_loss,
                     "count": id_gen_stats["count"],
                     "validation_metrics": id_val_metrics,
                     "pass_at_k": _format_pass(id_pass_series),
+                    "maj_at_k": _format_maj(id_maj_series),
                     "per_op_pass_at_k": {op: _format_pass(series) for op, series in id_per_op_pass_series.items()},
+                    "per_op_maj_at_k": {op: _format_maj(series) for op, series in id_per_op_maj_series.items()},
+                    "per_op_avg_correct_ratio": id_per_op_avg_correct_ratio,
                     "per_op_accuracy": per_op_metrics(id_per_op),
                     "per_op_avg_response_len": per_op_avg_resp_len(id_per_op),
                     "per_op_avg_loss": per_op_avg_loss(id_per_op_loss),
@@ -1674,12 +1781,16 @@ def main():
                 },
                 "ood": {
                     "answer_accuracy": ood_acc,
+                    "avg_correct_ratio": ood_avg_correct_ratio,
                     "avg_response_len": ood_avg_resp_len,
                     "avg_loss": ood_avg_loss,
                     "count": ood_gen_stats["count"],
                     "validation_metrics": ood_val_metrics,
                     "pass_at_k": _format_pass(ood_pass_series),
+                    "maj_at_k": _format_maj(ood_maj_series),
                     "per_op_pass_at_k": {op: _format_pass(series) for op, series in ood_per_op_pass_series.items()},
+                    "per_op_maj_at_k": {op: _format_maj(series) for op, series in ood_per_op_maj_series.items()},
+                    "per_op_avg_correct_ratio": ood_per_op_avg_correct_ratio,
                     "per_op_accuracy": per_op_metrics(ood_per_op),
                     "per_op_avg_response_len": per_op_avg_resp_len(ood_per_op),
                     "per_op_avg_loss": per_op_avg_loss(ood_per_op_loss),
@@ -1688,6 +1799,7 @@ def main():
                 },
                 "total": {
                     "answer_accuracy": total_acc,
+                    "avg_correct_ratio": total_avg_correct_ratio,
                     "avg_loss": total_avg_loss,
                     "count": total_count,
                     "validation_metrics": {
@@ -1695,7 +1807,10 @@ def main():
                         "ood": ood_val_metrics,
                     },
                     "pass_at_k": _format_pass(total_pass_series),
+                    "maj_at_k": _format_maj(total_maj_series),
                     "per_op_pass_at_k": {op: _format_pass(series) for op, series in total_per_op_pass_series.items()},
+                    "per_op_maj_at_k": {op: _format_maj(series) for op, series in total_per_op_maj_series.items()},
+                    "per_op_avg_correct_ratio": total_per_op_avg_correct_ratio,
                     "per_op_accuracy": total_per_op,
                     "per_op_avg_response_len": total_per_op_resp_len,
                     "per_op_avg_loss": total_per_op_loss,
@@ -1718,10 +1833,20 @@ def main():
                     return grouped
 
                 def _template_metrics(records: List[Dict[str, Any]], key_prefix: str) -> Dict[str, Any]:
-                    counts, per_op_counts = _aggregate_pass_counts(records, key_prefix=key_prefix)
+                    counts, per_op_counts, answers, per_op_answers = _aggregate_pass_counts(records, key_prefix=key_prefix)
                     pass_series = _compute_pass_series(counts.values(), args.sample_k)
+                    maj_series = _compute_maj_series(answers, args.sample_k)
+                    avg_correct_ratio = _compute_avg_correct_ratio(counts.values())
                     per_op_pass_at_k = {
                         op: _format_pass(_compute_pass_series(op_counts.values(), args.sample_k))
+                        for op, op_counts in per_op_counts.items()
+                    }
+                    per_op_maj_at_k = {
+                        op: _format_maj(_compute_maj_series(op_ans, args.sample_k))
+                        for op, op_ans in per_op_answers.items()
+                    }
+                    per_op_avg_correct_ratio = {
+                        op: _compute_avg_correct_ratio(op_counts.values())
                         for op, op_counts in per_op_counts.items()
                     }
                     resp_tokens_sum = sum(int(rec.get("resp_tokens", 0) or 0) for rec in records)
@@ -1733,10 +1858,14 @@ def main():
                         "count": total_examples,
                         "correct": correct,
                         "answer_accuracy": accuracy,
+                        "avg_correct_ratio": avg_correct_ratio,
                         "avg_response_len": avg_resp_len,
                         "resp_tokens_sum": resp_tokens_sum,
                         "pass_at_k": _format_pass(pass_series),
+                        "maj_at_k": _format_maj(maj_series),
                         "per_op_pass_at_k": per_op_pass_at_k,
+                        "per_op_maj_at_k": per_op_maj_at_k,
+                        "per_op_avg_correct_ratio": per_op_avg_correct_ratio,
                     }
 
                 id_grouped = _group_by_template(id_examples_all_sorted)
@@ -1790,6 +1919,9 @@ def main():
                 "id_acc": float(id_acc),
                 "ood_acc": float(ood_acc),
                 "total_acc": float(total_acc),
+                "id_avg_correct_ratio": float(id_avg_correct_ratio),
+                "ood_avg_correct_ratio": float(ood_avg_correct_ratio),
+                "total_avg_correct_ratio": float(total_avg_correct_ratio),
                 "id_avg_loss": float(id_avg_loss),
                 "ood_avg_loss": float(ood_avg_loss),
                 "total_avg_loss": float(total_avg_loss),
@@ -1830,6 +1962,7 @@ def main():
             fields = [
                 "checkpoint",
                 "id_acc", "ood_acc", "total_acc",
+                "id_avg_correct_ratio", "ood_avg_correct_ratio", "total_avg_correct_ratio",
                 "id_avg_loss", "ood_avg_loss", "total_avg_loss",
                 "id_avg_resp_len", "ood_avg_resp_len",
                 "count_id", "count_ood", "count_total",
