@@ -106,7 +106,8 @@ def _compute_step_process_reward(
                 + len(report["dependency_mismatches"])
                 + len(report["missing_in_pred"])
             )
-            structural_penalty += min(len(report["extra_in_pred"]), total_nodes)
+            # Extra predicted nodes are allowed and do not affect ProcessAcc according to paper A.4
+            # structural_penalty += min(len(report["extra_in_pred"]), total_nodes)
             if report["answer_mismatch"] is not None:
                 structural_penalty += 1
             process_reward = max(0.0, 1.0 - structural_penalty / total_nodes)
