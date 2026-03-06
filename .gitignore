@@ -12,6 +12,7 @@ eggs/
 
 # Data and checkpoints (too large)
 data/
+!dllm/dllm/data/
 checkpoints/
 *.pt
 *.safetensors
