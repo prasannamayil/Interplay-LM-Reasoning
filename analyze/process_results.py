@@ -87,13 +87,20 @@ ALL_RUNS = [
 ALL_RUNS_V3 = [
     "base_model_eval_skewed_pass128",
     # GRPO v3 (2 epochs)
-    "grpo_id_v3", "grpo_edge_v3", "grpo_hard_v3", "grpo_mixed_v3",
-    # Method variants (edge + hard only)
-    "grpo_clip_cov_edge_v3", "grpo_clip_cov_hard_v3",
-    "grpo_kl_cov_edge_v3", "grpo_kl_cov_hard_v3",
-    "grpo_ent_cov_edge_v3", "grpo_ent_cov_hard_v3",
-    "grpo_mgpo_edge_v3", "grpo_mgpo_hard_v3",
-    "grpo_rup_edge_v3", "grpo_rup_hard_v3",
+    "grpo_edge_v3",
+    "grpo_hard_v3",
+    # Method variants - edge
+    "grpo_clip_cov_edge_v3",
+    "grpo_kl_cov_edge_v3",
+    "grpo_ent_cov_edge_v3",
+    "grpo_mgpo_edge_v3",
+    "grpo_rup_edge_v3",
+    # Method variants - hard
+    "grpo_clip_cov_hard_v3",
+    "grpo_kl_cov_hard_v3",
+    "grpo_ent_cov_hard_v3",
+    "grpo_mgpo_hard_v3",
+    "grpo_rup_hard_v3",
 ]
 
 # Nice display names
