@@ -400,7 +400,18 @@ class RayPPOTrainer:
 
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
-            val_batch_size = len(self.val_dataset)
+            val_n = getattr(self.config.actor_rollout_ref.rollout, "val_kwargs", {})
+            val_n = getattr(val_n, "n", 1) if not isinstance(val_n, dict) else val_n.get("n", 1)
+            val_n = max(int(val_n), 1)
+            n_gpus = max(int(self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes), 1)
+            max_effective_seqs = 8192 * n_gpus
+            safe_batch = max(1, max_effective_seqs // val_n)
+            val_batch_size = min(len(self.val_dataset), safe_batch)
+            print(
+                f"[val_batch_size auto] val_n={val_n}, n_gpus={n_gpus}, "
+                f"safe_batch={safe_batch}, val_dataset={len(self.val_dataset)}, "
+                f"using val_batch_size={val_batch_size}"
+            )
 
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
