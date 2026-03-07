@@ -43,7 +43,7 @@ accelerate launch \
     --output_dir "${OUTPUT_DIR}" \
     --max_length 512 \
     --num_train_epochs 3 \
-    --learning_rate 1e-4 \
+    --learning_rate 2e-5 \
     --per_device_train_batch_size 4 \
     --gradient_accumulation_steps 4 \
     --block_size ${BLOCK_SIZE} \

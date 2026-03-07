@@ -99,9 +99,11 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Removed torch_dtype=torch.bfloat16 because Mamba's state parameters 
+    # (like dt_proj, A_log, D) MUST remain in float32 to prevent numeric 
+    # overflow/explosion which causes massive loss (~44).
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        torch_dtype=torch.bfloat16,
     )
 
     dataset = load_dataset(args.dataset, split="train")

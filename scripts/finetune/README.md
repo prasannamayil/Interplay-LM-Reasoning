@@ -119,6 +119,30 @@ Generates:
 - Training curves (accuracy vs step) per model family
 - Summary table of max accuracies
 
+## Loss comparability: why Pythia / BD3LM / Mamba look so different
+
+Training curves are **not directly comparable** across the three setups:
+
+| Model type | What “loss” measures | Typical scale |
+|------------|----------------------|---------------|
+| **Pythia** (AR) | Mean cross-entropy per **target token** (next-token prediction). | ~2–4 (NLL); ppl ~10–60. |
+| **BD3LM** | Diffusion objective: weighted CE over **masked tokens only**, normalized by `loss_norm_type`. Logged **nll**/**ppl** are a *proxy*: (sum of CE on masked positions) / (total valid tokens)—**not** sequence NLL or AR perplexity; true sequence log-probability under the diffusion model would require an ELBO or sampling. | Proxy only; not comparable to AR ppl. |
+| **Mamba** (AR) | Should be mean CE per token (same as Pythia) **if** the same Trainer and data are used. | Should be in the same range as Pythia. |
+
+So:
+
+- **BD3LM “loss” is a different quantity** (masked, timestep-weighted). Do not compare its raw value to Pythia/Mamba.
+- **Pythia and Mamba** are both causal LM; if they use the same data and tokenizer (GPT-NeoX, Alpaca), their **reported loss** should be on a similar scale. If Mamba shows ~40 while Pythia shows ~2.5 on the same run setup, likely causes are:
+  - **Loss reduction**: Mamba’s `MambaForCausalLM` might return **sum** over tokens instead of **mean**. Then “loss” ≈ mean_NLL × num_tokens_per_batch, which can be large.
+  - **Learning rate / optimization**: Mamba may need a different LR or schedule (see below).
+
+To make training **roughly comparable**:
+
+1. **Same distribution**: Use the same dataset and tokenizer for all (you already do for Alpaca + GPT-NeoX for Pythia/Mamba; BD3LM uses the same data but a different objective).
+2. **Comparable metrics**: Log **per-token NLL** and **perplexity** (e.g. `exp(mean_nll)`) for every run. For Pythia this is the default “loss” when it’s mean CE; for Mamba, add a callback that evaluates the same (mean CE on labels), or confirm the model returns mean loss.
+3. **Epochs**: Same number of epochs (or same number of gradient steps) across Pythia, Mamba, and BD3LM so that “amount of data seen” is aligned.
+4. **Mamba**: If loss stays very high and flat, try **higher learning rate** (e.g. 5e-5 or 1e-4 with warmup) and/or verify that the logged loss is **mean** over tokens, not sum.
+
 ## Evaluation Details
 
 All models are evaluated using the lm-evaluation-harness with loglikelihood-based

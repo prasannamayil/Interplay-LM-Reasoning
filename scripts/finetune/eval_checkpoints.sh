@@ -19,7 +19,7 @@
 #
 # Environment:
 #   GPU_LIST       GPU IDs to use (default: 0,1,2,3,4,5,6,7)
-#   NUM_CKPTS      Max checkpoints to evaluate (default: 10)
+#   NUM_CKPTS      Max checkpoints to evaluate (default: 12)
 #   BLOCK_SIZE     BD3LM block size for eval (default: 32)
 #   MC_NUM         MC samples for diffusion loglikelihood (default: 128)
 #
@@ -46,7 +46,7 @@ RUN_NAME=$(basename "$RUN_DIR")
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
 IFS=',' read -ra GPU_ARRAY <<< "${GPU_LIST}"
 NGPUS="${#GPU_ARRAY[@]}"
-NUM_CKPTS="${NUM_CKPTS:-10}"
+NUM_CKPTS="${NUM_CKPTS:-12}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 MC_NUM="${MC_NUM:-128}"
 
