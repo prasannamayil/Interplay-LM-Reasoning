@@ -13,7 +13,6 @@ import torch
 from torch import nn
 
 import transformers
-from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 
@@ -33,7 +32,7 @@ class A2DGPTNeoXModel(transformers.GPTNeoXModel):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values=None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
@@ -44,22 +43,15 @@ class A2DGPTNeoXModel(transformers.GPTNeoXModel):
                 "You must specify exactly one of input_ids or inputs_embeds"
             )
 
+        # Diffusion models don't use KV caching
+        use_cache = False
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_in(input_ids)
 
-        if use_cache and past_key_values is None:
-            past_key_values = DynamicCache(config=self.config)
-
         if cache_position is None:
-            past_seen_tokens = (
-                past_key_values.get_seq_length()
-                if past_key_values is not None
-                else 0
-            )
             cache_position = torch.arange(
-                past_seen_tokens,
-                past_seen_tokens + inputs_embeds.shape[1],
-                device=inputs_embeds.device,
+                inputs_embeds.shape[1], device=inputs_embeds.device
             )
 
         if position_ids is None:
@@ -85,21 +77,21 @@ class A2DGPTNeoXModel(transformers.GPTNeoXModel):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:
-            hidden_states = layer(
+            # GPT-NeoX layers return (hidden_states, present_key_value)
+            layer_outputs = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                layer_past=past_key_values,
-                use_cache=use_cache,
+                use_cache=False,
                 position_embeddings=position_embeddings,
                 cache_position=cache_position,
                 **kwargs,
             )
+            hidden_states = layer_outputs[0]
 
         hidden_states = self.final_layer_norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values if use_cache else None,
         )
 
 
