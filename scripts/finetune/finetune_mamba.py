@@ -99,12 +99,16 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Removed torch_dtype=torch.bfloat16 because Mamba's state parameters 
-    # (like dt_proj, A_log, D) MUST remain in float32 to prevent numeric 
-    # overflow/explosion which causes massive loss (~44).
+    # CRITICAL FIX for Mamba BF16: Force SSM dt_proj, A_log, D parameters to stay in fp32
+    # to avoid exploding loss (~44) during finetuning.
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
+        torch_dtype=torch.bfloat16,
     )
+    
+    for name, param in model.named_parameters():
+        if "dt_proj" in name or "A_log" in name or "D" in name:
+            param.data = param.data.to(torch.float32)
 
     dataset = load_dataset(args.dataset, split="train")
     dataset = dataset.map(
