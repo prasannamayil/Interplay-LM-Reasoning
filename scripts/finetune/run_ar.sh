@@ -37,13 +37,23 @@ bash "${SCRIPT_DIR}/download_models.sh"
 echo ""
 
 # --- Train Pythia ---
-echo "=== Finetune Pythia ${SIZE} (AR) ==="
-bash "${SCRIPT_DIR}/run_finetune_pythia.sh" "${SIZE}"
+PYTHIA_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-alpaca"
+if [[ -d "${PYTHIA_DIR}/checkpoint-final" ]]; then
+    echo "=== [Skip] Pythia ${SIZE} already trained ==="
+else
+    echo "=== Finetune Pythia ${SIZE} (AR) ==="
+    bash "${SCRIPT_DIR}/run_finetune_pythia.sh" "${SIZE}"
+fi
 echo ""
 
 # --- Train Mamba ---
-echo "=== Finetune Mamba ${SIZE} (SSM) ==="
-bash "${SCRIPT_DIR}/run_finetune_mamba.sh" "${SIZE}"
+MAMBA_DIR="${PROJECT_ROOT}/results/finetune/mamba-${SIZE}-alpaca"
+if [[ -d "${MAMBA_DIR}/checkpoint-final" ]]; then
+    echo "=== [Skip] Mamba ${SIZE} already trained ==="
+else
+    echo "=== Finetune Mamba ${SIZE} (SSM) ==="
+    bash "${SCRIPT_DIR}/run_finetune_mamba.sh" "${SIZE}"
+fi
 echo ""
 
 # --- Eval Pythia ---

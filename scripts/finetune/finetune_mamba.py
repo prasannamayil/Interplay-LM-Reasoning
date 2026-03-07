@@ -127,8 +127,6 @@ def main():
         report_to="wandb",
         run_name=os.path.basename(args.output_dir),
         ddp_find_unused_parameters=False,
-        fsdp="full_shard auto_wrap",
-        fsdp_config={"fsdp_transformer_layer_cls_to_wrap": "GPTNeoXLayer"},
         gradient_checkpointing=True,
         dataloader_num_workers=4,
         remove_unused_columns=False,

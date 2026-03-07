@@ -45,13 +45,23 @@ bash "${SCRIPT_DIR}/run_convert_pythia.sh"
 echo ""
 
 # --- Train BD3LM ---
-echo "=== Finetune BD3LM ${SIZE} (block_size=${BLOCK_SIZE}) ==="
-bash "${SCRIPT_DIR}/run_finetune_bd3lm.sh" "${SIZE}" "${BLOCK_SIZE}"
+BD3LM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-alpaca"
+if [[ -d "${BD3LM_DIR}/checkpoint-final" ]]; then
+    echo "=== [Skip] BD3LM ${SIZE} already trained ==="
+else
+    echo "=== Finetune BD3LM ${SIZE} (block_size=${BLOCK_SIZE}) ==="
+    bash "${SCRIPT_DIR}/run_finetune_bd3lm.sh" "${SIZE}" "${BLOCK_SIZE}"
+fi
 echo ""
 
 # --- Train MDLM ---
-echo "=== Finetune MDLM ${SIZE} ==="
-bash "${SCRIPT_DIR}/run_finetune_mdlm.sh" "${SIZE}"
+MDLM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-mdlm-alpaca"
+if [[ -d "${MDLM_DIR}/checkpoint-final" ]]; then
+    echo "=== [Skip] MDLM ${SIZE} already trained ==="
+else
+    echo "=== Finetune MDLM ${SIZE} ==="
+    bash "${SCRIPT_DIR}/run_finetune_mdlm.sh" "${SIZE}"
+fi
 echo ""
 
 # --- Eval BD3LM ---
