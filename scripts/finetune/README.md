@@ -25,26 +25,21 @@ All base models are trained on The Pile with the same GPT-NeoX tokenizer:
 
 ## Quick Start
 
-Run everything for a single model size (default 2.8B):
+Two scripts -- one for training, one for evaluation:
 
 ```bash
-bash scripts/finetune/run_finetune_all.sh 2.8b
-```
+# Step 1: Train all 4 model types on Alpaca (download + convert + finetune)
+bash scripts/finetune/run_train_all.sh 2.8b
 
-Then evaluate:
+# Step 2: Evaluate all checkpoints on harness benchmarks
+bash scripts/finetune/run_eval_all.sh 2.8b
 
-```bash
-bash scripts/finetune/eval_checkpoints.sh pythia results/finetune/pythia-2.8b-alpaca
-bash scripts/finetune/eval_checkpoints.sh mamba results/finetune/mamba-2.8b-alpaca
-bash scripts/finetune/eval_checkpoints.sh bd3lm results/finetune/pythia-2.8b-bd3lm-bs32-alpaca
-bash scripts/finetune/eval_checkpoints.sh mdlm results/finetune/pythia-2.8b-mdlm-alpaca
-```
-
-Plot results:
-
-```bash
+# Step 3: Plot acc-vs-acc generalization trends
 python analyze/results_finetune.py --save-dir plots/finetune
 ```
+
+All models share the **GPT-NeoX-20B tokenizer** (from The Pile), making accuracy
+metrics directly comparable. This is NOT the GSM-Infinity simple tokenizer (2200 vocab).
 
 ## Step-by-Step Guide
 
@@ -139,14 +134,15 @@ direct accuracy-vs-accuracy comparison across model families.
 ```
 scripts/finetune/
     README.md                       # This file
+    run_train_all.sh                # >>> RUN THIS: train all 4 model types
+    run_eval_all.sh                 # >>> RUN THIS: evaluate all checkpoints
     download_models.sh              # Download Pythia + Mamba from HF
     run_convert_pythia.sh           # Convert Pythia -> A2D-GPTNeoX
     run_finetune_pythia.sh          # Finetune Pythia (AR)
     run_finetune_mamba.sh           # Finetune Mamba (SSM)
     run_finetune_bd3lm.sh           # Finetune Pythia-BD3LM
     run_finetune_mdlm.sh           # Finetune Pythia-MDLM
-    run_finetune_all.sh             # Run full pipeline
-    eval_checkpoints.sh             # Evaluate checkpoints on benchmarks
+    eval_checkpoints.sh             # Evaluate one model type's checkpoints
     finetune_pythia.py              # Pythia finetuning script
     finetune_mamba.py               # Mamba finetuning script
 
