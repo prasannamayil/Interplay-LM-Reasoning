@@ -45,7 +45,17 @@ from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained('${output_dir}')
 if '<|mask|>' not in tokenizer.get_vocab():
     tokenizer.add_special_tokens({'additional_special_tokens': ['<|mask|>']})
-    tokenizer.save_pretrained('${output_dir}')
+# GPT-NeoX tokenizer has no chat template; add a minimal one for SFT
+if tokenizer.chat_template is None:
+    tokenizer.chat_template = (
+        '{% for message in messages %}'
+        '{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] + \"\n\" }}'
+        '{% elif message[\"role\"] == \"assistant\" %}{{ message[\"content\"] + eos_token }}'
+        '{% endif %}'
+        '{% endfor %}'
+        '{% if add_generation_prompt %}{% endif %}'
+    )
+tokenizer.save_pretrained('${output_dir}')
 with open('${output_dir}/config.json', 'r') as f:
     config = json.load(f)
 config['mask_token_id'] = tokenizer.convert_tokens_to_ids('<|mask|>')
