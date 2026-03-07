@@ -25,16 +25,19 @@ All base models are trained on The Pile with the same GPT-NeoX tokenizer:
 
 ## Quick Start
 
-Two scripts -- one for training, one for evaluation:
+Two scripts, designed to run on **two separate nodes in parallel**:
 
 ```bash
-# Step 1: Train all 4 model types on Alpaca (download + convert + finetune)
-bash scripts/finetune/run_train_all.sh 2.8b
+# Node 1: AR models (Pythia + Mamba) -- train then eval
+bash scripts/finetune/run_ar.sh 2.8b
 
-# Step 2: Evaluate all checkpoints on harness benchmarks
-bash scripts/finetune/run_eval_all.sh 2.8b
+# Node 2: Diffusion models (BD3LM + MDLM) -- train then eval
+bash scripts/finetune/run_diffusion.sh 2.8b
+```
 
-# Step 3: Plot acc-vs-acc generalization trends
+After both finish, plot the generalization trends:
+
+```bash
 python analyze/results_finetune.py --save-dir plots/finetune
 ```
 
@@ -134,8 +137,8 @@ direct accuracy-vs-accuracy comparison across model families.
 ```
 scripts/finetune/
     README.md                       # This file
-    run_train_all.sh                # >>> RUN THIS: train all 4 model types
-    run_eval_all.sh                 # >>> RUN THIS: evaluate all checkpoints
+    run_ar.sh                       # >>> NODE 1: Pythia + Mamba train + eval
+    run_diffusion.sh                # >>> NODE 2: BD3LM + MDLM train + eval
     download_models.sh              # Download Pythia + Mamba from HF
     run_convert_pythia.sh           # Convert Pythia -> A2D-GPTNeoX
     run_finetune_pythia.sh          # Finetune Pythia (AR)
