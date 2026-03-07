@@ -84,8 +84,8 @@ def main():
     parser.add_argument("--output_dir", type=str, default="results/finetune/pythia-2.8b-alpaca")
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--num_train_epochs", type=int, default=3)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=4)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
     parser.add_argument("--save_steps", type=int, default=200)
@@ -127,7 +127,6 @@ def main():
         report_to="wandb",
         run_name=os.path.basename(args.output_dir),
         ddp_find_unused_parameters=False,
-        gradient_checkpointing=True,
         dataloader_num_workers=4,
         remove_unused_columns=False,
     )

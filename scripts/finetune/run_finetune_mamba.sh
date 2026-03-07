@@ -30,8 +30,8 @@ torchrun --nproc_per_node=${NGPUS} \
     --model_name_or_path "${MODEL}" \
     --output_dir "${OUTPUT_DIR}" \
     --num_train_epochs 3 \
-    --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 4 \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 16 \
     --learning_rate 2e-5 \
     --warmup_ratio 0.03 \
     --save_steps 200 \
