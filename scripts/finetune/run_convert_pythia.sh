@@ -43,8 +43,9 @@ for model in "${MODELS[@]}"; do
 import json
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained('${output_dir}')
-if '<|mask|>' not in tokenizer.get_vocab():
-    tokenizer.add_special_tokens({'additional_special_tokens': ['<|mask|>']})
+# Add <|mask|> as the proper mask_token (not just additional_special_tokens)
+if tokenizer.mask_token is None or tokenizer.mask_token != '<|mask|>':
+    tokenizer.add_special_tokens({'mask_token': '<|mask|>'})
 # GPT-NeoX tokenizer has no chat template; add a minimal one for SFT
 if tokenizer.chat_template is None:
     tokenizer.chat_template = (
@@ -58,7 +59,7 @@ if tokenizer.chat_template is None:
 tokenizer.save_pretrained('${output_dir}')
 with open('${output_dir}/config.json', 'r') as f:
     config = json.load(f)
-config['mask_token_id'] = tokenizer.convert_tokens_to_ids('<|mask|>')
+config['mask_token_id'] = tokenizer.mask_token_id
 config['pad_token_id'] = tokenizer.eos_token_id
 config['use_cache'] = False
 with open('${output_dir}/config.json', 'w') as f:

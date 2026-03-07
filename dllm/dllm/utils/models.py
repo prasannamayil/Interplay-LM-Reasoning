@@ -100,6 +100,7 @@ def get_tokenizer(
     )
 
     from dllm.pipelines.a2d import (
+        A2DGPTNeoXLMHeadModel,
         A2DLlamaLMHeadModel,
         A2DQwen2LMHeadModel,
         A2DQwen3LMHeadModel,
@@ -192,6 +193,10 @@ def get_tokenizer(
 [Answer]
 {% endif %}
 """
+    elif issubclass(model_cls, A2DGPTNeoXLMHeadModel):
+        tokenizer.add_special_tokens({"mask_token": "<|mask|>"})
+        tokenizer.eot_token = tokenizer.eos_token
+        tokenizer.eot_token_id = tokenizer.eos_token_id
     elif issubclass(model_cls, A2DLlamaLMHeadModel):
         tokenizer.add_special_tokens({"mask_token": "<|mask|>"})
         tokenizer.eot_token = "<|eot_id|>"
