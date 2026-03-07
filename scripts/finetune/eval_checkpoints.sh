@@ -118,7 +118,7 @@ while IFS= read -r CKPT; do
         pythia)
             CUDA_VISIBLE_DEVICES=$GPU lm_eval \
                 --model hf \
-                --model_args "pretrained=${CKPT},dtype=bfloat16" \
+                --model_args "pretrained=${CKPT}" \
                 --tasks "${TASKS}" \
                 --num_fewshot 0 \
                 --batch_size auto \
@@ -128,7 +128,7 @@ while IFS= read -r CKPT; do
         mamba)
             CUDA_VISIBLE_DEVICES=$GPU lm_eval \
                 --model hf \
-                --model_args "pretrained=${CKPT},dtype=bfloat16" \
+                --model_args "pretrained=${CKPT}" \
                 --tasks "${TASKS}" \
                 --num_fewshot 0 \
                 --batch_size auto \

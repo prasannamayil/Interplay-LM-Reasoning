@@ -35,7 +35,6 @@ torchrun --nproc_per_node=${NGPUS} \
     --warmup_ratio 0.03 \
     --save_steps 200 \
     --save_total_limit 20 \
-    --max_length 512 \
-    --bf16
+    --max_length 512
 
 echo "Done: ${OUTPUT_DIR}"

@@ -49,7 +49,6 @@ accelerate launch \
     --block_size ${BLOCK_SIZE} \
     --save_steps 200 \
     --save_total_limit 20 \
-    --bf16 True \
     --logging_steps 10 \
     --report_to wandb \
     --run_name "pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-alpaca"

@@ -46,7 +46,6 @@ accelerate launch \
     --gradient_accumulation_steps 4 \
     --save_steps 200 \
     --save_total_limit 20 \
-    --bf16 True \
     --logging_steps 10 \
     --report_to wandb \
     --run_name "pythia-${SIZE}-mdlm-alpaca"

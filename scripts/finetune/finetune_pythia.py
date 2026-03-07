@@ -90,7 +90,7 @@ def main():
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--save_total_limit", type=int, default=20)
-    parser.add_argument("--bf16", action="store_true", default=True)
+    parser.add_argument("--bf16", action="store_true", default=False)
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
     args = parser.parse_args()
@@ -101,7 +101,7 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float32,
     )
 
     dataset = load_dataset(args.dataset, split="train")
