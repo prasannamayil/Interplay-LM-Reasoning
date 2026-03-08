@@ -16,7 +16,8 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SIZE="${1:-2.8b}"
 MODEL="state-spaces/mamba-${SIZE}-hf"
-OUTPUT_DIR="${PROJECT_ROOT}/results/finetune/mamba-${SIZE}-alpaca"
+# Allow overriding output dir for 1e-4 run
+OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE:-${PROJECT_ROOT}/results/finetune/mamba-${SIZE}-alpaca}"
 NGPUS=8
 # Mamba can need a higher LR than Pythia; override with MAMBA_LR=5e-5 or 1e-4 if loss is stuck high
 LEARNING_RATE="${MAMBA_LR:-2e-5}"
