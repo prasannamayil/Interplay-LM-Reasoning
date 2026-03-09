@@ -1,33 +1,47 @@
 """
-Pass@128 evaluation for diffusion language models on GSM-Infinity test_small.
+Pass@128 evaluation for diffusion and AR (transformer) models on GSM-Infinity test_small.
 
 Scoring: a point is scored only when both process and outcome are correct.
 Extra steps in the generated solution are not penalized. When gold solution
 cannot be parsed for process checking, falls back to outcome-only for that example.
 
-For each test example, generates n_samples completions (k for pass@k) using the
-DLLM sampler, then computes pass@j for j in {1,2,4,8,...} up to n_samples.
+For each test example, generates n_samples completions (k for pass@k), then
+computes pass@j for j in {1,2,4,8,...} up to n_samples.
+- DLLM (--sampler_type mdlm/bd3lm): uses diffusion sampler.
+- AR (--sampler_type ar): standard causal LM; use for LLaMA-Factory/transformer
+  checkpoints to get the same process+outcome scoring as DLLM (instead of
+  outcome-only from scripts/eval_checkpoints.py).
+
 Use --n_samples 1 for fast pass@1; --n_samples 8 or 128 for pass@8 / pass@128.
 
 Usage:
     source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+    export PROJECT_ROOT=/fast/pmayilvahanan/Interplay-LM-Reasoning
     cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
 
     # A2D-MDLM evaluation
     python examples/gsm_infinity/eval_pass128.py \
         --model_path saves/gsm_infinity/a2d_mdlm_100M/checkpoint-final \
         --sampler_type mdlm \
-        --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
+        --test_dir $PROJECT_ROOT/data/composition_hf/test_small \
         --n_samples 128 \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_mdlm_100M
+        --output_dir $PROJECT_ROOT/results/dllm_eval/a2d_mdlm_100M
 
     # A2D-BD3LM evaluation
     python examples/gsm_infinity/eval_pass128.py \
         --model_path saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final \
         --sampler_type bd3lm \
-        --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
+        --test_dir $PROJECT_ROOT/data/composition_hf/test_small \
         --n_samples 128 \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_bd3lm_100M
+        --output_dir $PROJECT_ROOT/results/dllm_eval/a2d_bd3lm_100M
+
+    # AR (transformer) with process+outcome (e.g. LLaMA-Factory checkpoints)
+    python examples/gsm_infinity/eval_pass128.py \
+        --model_path $PROJECT_ROOT/LLaMA-Factory/saves/gsm_infinity/pt_400M_ar_20260223_160500 \
+        --sampler_type ar \
+        --test_dir $PROJECT_ROOT/data/composition_hf/test_small \
+        --n_samples 128 \
+        --output_dir $PROJECT_ROOT/results/transformer_eval/pt_400M_ar_20260223_160500/checkpoint-final
 """
 
 import argparse
@@ -43,6 +57,7 @@ from typing import Tuple
 import numpy as np
 import torch
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import dllm
 from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
@@ -228,41 +243,57 @@ def evaluate(
 ):
     os.makedirs(output_dir, exist_ok=True)
 
+    is_ar = sampler_type == "ar"
+
     # --- Load model and tokenizer ---
     print(f"Loading model from {model_path}")
-    model = dllm.utils.get_model(model_name_or_path=model_path, dtype=torch.bfloat16)
-    model = model.to(device).eval()
-    tokenizer = dllm.utils.get_tokenizer(model_name_or_path=model_path)
+    if is_ar:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map=None,
+        )
+        model = model.to(device).eval()
+        sampler = None
+        sampler_config = None
+    else:
+        model = dllm.utils.get_model(model_name_or_path=model_path, dtype=torch.bfloat16)
+        model = model.to(device).eval()
+        tokenizer = dllm.utils.get_tokenizer(model_name_or_path=model_path)
+        if sampler_type == "mdlm":
+            sampler = MDLMSampler(model=model, tokenizer=tokenizer)
+            sampler_config = MDLMSamplerConfig(
+                max_new_tokens=max_new_tokens,
+                steps=steps,
+                block_size=block_size_mdlm,
+                temperature=temperature,
+                remasking="low_confidence",
+            )
+        elif sampler_type == "bd3lm":
+            sampler = BD3LMSampler(model=model, tokenizer=tokenizer)
+            sampler_config = BD3LMSamplerConfig(
+                max_new_tokens=max_new_tokens,
+                steps=steps,
+                block_size=block_size_bd3lm,
+                temperature=temperature,
+                remasking="low_confidence",
+            )
+        else:
+            raise ValueError(f"Unknown sampler type: {sampler_type}")
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
     print(f"Sampler type: {sampler_type}")
-    print(f"Temperature: {temperature}, Steps: {steps}, Max new tokens: {max_new_tokens}")
+    if not is_ar:
+        print(f"Temperature: {temperature}, Steps: {steps}, Max new tokens: {max_new_tokens}")
+    else:
+        print(f"Temperature: {temperature}, Max new tokens: {max_new_tokens}")
     print(f"Scoring: process+outcome (both required; extra steps not penalized)")
     if parse_graph is None:
         print("WARNING: verl.reward_fn.parse_graph not available; using outcome-only scoring.")
-
-    # --- Create sampler ---
-    if sampler_type == "mdlm":
-        sampler = MDLMSampler(model=model, tokenizer=tokenizer)
-        sampler_config = MDLMSamplerConfig(
-            max_new_tokens=max_new_tokens,
-            steps=steps,
-            block_size=block_size_mdlm,
-            temperature=temperature,
-            remasking="low_confidence",
-        )
-    elif sampler_type == "bd3lm":
-        sampler = BD3LMSampler(model=model, tokenizer=tokenizer)
-        sampler_config = BD3LMSamplerConfig(
-            max_new_tokens=max_new_tokens,
-            steps=steps,
-            block_size=block_size_bd3lm,
-            temperature=temperature,
-            remasking="low_confidence",
-        )
-    else:
-        raise ValueError(f"Unknown sampler type: {sampler_type}")
 
     # --- Load test data ---
     print(f"\nLoading test data from {test_dir}")
@@ -293,38 +324,69 @@ def evaluate(
 
             # Generate n_samples completions in micro-batches
             all_correct = []
-            for batch_start in range(0, n_samples, batch_size):
-                batch_end = min(batch_start + batch_size, n_samples)
-                cur_batch_size = batch_end - batch_start
-
-                # Create batch of identical prompts
-                inputs = [prompt_ids] * cur_batch_size
-
-                # Generate
-                with torch.no_grad():
-                    outputs = sampler.sample(inputs, config=sampler_config)
-                    if hasattr(outputs, "sequences"):
-                        sequences = outputs.sequences
+            eos_id = getattr(tokenizer, "eos_token_id", None)
+            if eos_id is None and hasattr(tokenizer, "convert_tokens_to_ids"):
+                _eos = tokenizer.convert_tokens_to_ids("</answer>")
+                if _eos != tokenizer.unk_token_id:
+                    eos_id = _eos
+            if is_ar:
+                # AR: standard causal LM generation
+                for batch_start in range(0, n_samples, batch_size):
+                    cur_batch_size = min(batch_size, n_samples - batch_start)
+                    batch_prompts = [prompt_text] * cur_batch_size
+                    enc = tokenizer(
+                        batch_prompts,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=min(getattr(tokenizer, "model_max_length", 2048), 2048),
+                    )
+                    enc = {k: v.to(device) for k, v in enc.items()}
+                    gen_kwargs = dict(
+                        **enc,
+                        max_new_tokens=max_new_tokens,
+                        eos_token_id=eos_id,
+                        pad_token_id=tokenizer.pad_token_id,
+                    )
+                    if temperature > 0:
+                        gen_kwargs["do_sample"] = True
+                        gen_kwargs["temperature"] = float(temperature)
                     else:
-                        sequences = outputs
-
-                # Decode and check answers
-                for i in range(cur_batch_size):
-                    seq = sequences[i].tolist()
-                    # Remove prompt tokens and decode
-                    gen_ids = seq[len(prompt_ids):]
-                    # Trim at EOS
-                    eos_id = tokenizer.eos_token_id
-                    if eos_id is not None and eos_id in gen_ids:
-                        gen_ids = gen_ids[:gen_ids.index(eos_id)]
-                    # Remove mask tokens
-                    mask_id = tokenizer.mask_token_id
-                    if mask_id is not None:
-                        gen_ids = [t for t in gen_ids if t != mask_id]
-
-                    generated_text = tokenizer.decode(gen_ids, skip_special_tokens=False)
-                    correct = check_process_and_outcome(generated_text, example)
-                    all_correct.append(correct)
+                        gen_kwargs["do_sample"] = False
+                    with torch.no_grad():
+                        gen = model.generate(**gen_kwargs)
+                    prompt_len = enc["attention_mask"].sum(dim=1)
+                    for i in range(cur_batch_size):
+                        pl = int(prompt_len[i].item())
+                        new_ids = gen[i, pl:].tolist()
+                        if eos_id is not None and eos_id in new_ids:
+                            new_ids = new_ids[:new_ids.index(eos_id)]
+                        generated_text = tokenizer.decode(new_ids, skip_special_tokens=False)
+                        correct = check_process_and_outcome(generated_text, example)
+                        all_correct.append(correct)
+            else:
+                # DLLM: diffusion sampler
+                for batch_start in range(0, n_samples, batch_size):
+                    batch_end = min(batch_start + batch_size, n_samples)
+                    cur_batch_size = batch_end - batch_start
+                    inputs = [prompt_ids] * cur_batch_size
+                    with torch.no_grad():
+                        outputs = sampler.sample(inputs, config=sampler_config)
+                        if hasattr(outputs, "sequences"):
+                            sequences = outputs.sequences
+                        else:
+                            sequences = outputs
+                    for i in range(cur_batch_size):
+                        seq = sequences[i].tolist()
+                        gen_ids = seq[len(prompt_ids):]
+                        if eos_id is not None and eos_id in gen_ids:
+                            gen_ids = gen_ids[:gen_ids.index(eos_id)]
+                        mask_id = tokenizer.mask_token_id
+                        if mask_id is not None:
+                            gen_ids = [t for t in gen_ids if t != mask_id]
+                        generated_text = tokenizer.decode(gen_ids, skip_special_tokens=False)
+                        correct = check_process_and_outcome(generated_text, example)
+                        all_correct.append(correct)
 
             n_correct = sum(all_correct)
             op_successes.append((n_samples, n_correct))
@@ -397,8 +459,8 @@ def main():
         help="Path to the model checkpoint",
     )
     parser.add_argument(
-        "--sampler_type", type=str, choices=["mdlm", "bd3lm"], required=True,
-        help="Sampler type: mdlm or bd3lm",
+        "--sampler_type", type=str, choices=["mdlm", "bd3lm", "ar"], required=True,
+        help="Sampler type: mdlm, bd3lm, or ar (autoregressive / transformer for process+outcome scoring)",
     )
     parser.add_argument(
         "--test_dir", type=str,

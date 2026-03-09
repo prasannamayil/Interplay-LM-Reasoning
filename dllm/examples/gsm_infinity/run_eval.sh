@@ -4,10 +4,14 @@
 # =============================================================================
 # Evaluates a trained DLLM checkpoint on composition_hf/test_small.
 # Default: pass@1. Use 4th argument or N_SAMPLES for pass@k (e.g. k=8 is cheaper than 128).
+# Relative model/output paths are resolved from PROJECT_ROOT.
 #
 # Usage:
 #   # pass@1 (default)
-#   bash dllm/examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm> <output_dir>
+#   bash dllm/examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm|ar> <output_dir>
+#
+#   # AR (transformer) with process+outcome: use run_eval_ar.sh or pass ar as 2nd arg
+#   bash dllm/examples/gsm_infinity/run_eval.sh <model_path> ar <output_dir> [k]
 #
 #   # pass@k via 4th argument (recommended)
 #   bash dllm/examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm> <output_dir> <k>
@@ -29,7 +33,7 @@ set -e
 # Parse Arguments
 # =============================================================================
 MODEL_PATH="${1:?Error: Model path required as first argument}"
-SAMPLER_TYPE="${2:?Error: Sampler type required (mdlm or bd3lm)}"
+SAMPLER_TYPE="${2:?Error: Sampler type required (mdlm, bd3lm, or ar)}"
 OUTPUT_DIR="${3:?Error: Output directory required as third argument}"
 # Optional 4th: k for pass@k (samples per prompt). Overrides N_SAMPLES.
 if [ -n "${4:-}" ]; then
@@ -72,9 +76,16 @@ source "${VENV}"
 export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
 cd "${DLLM_ROOT}"
 
-# Resolve relative model paths
+# Resolve relative paths from repo root.
 if [[ ! "${MODEL_PATH}" = /* ]]; then
-    MODEL_PATH="${DLLM_ROOT}/${MODEL_PATH}"
+    if [[ "${SAMPLER_TYPE}" == "ar" ]]; then
+        MODEL_PATH="${PROJECT_ROOT}/${MODEL_PATH}"
+    else
+        MODEL_PATH="${DLLM_ROOT}/${MODEL_PATH}"
+    fi
+fi
+if [[ ! "${OUTPUT_DIR}" = /* ]]; then
+    OUTPUT_DIR="${PROJECT_ROOT}/${OUTPUT_DIR}"
 fi
 
 # =============================================================================

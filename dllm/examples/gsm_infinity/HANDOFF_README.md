@@ -390,6 +390,28 @@ BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
 | `BATCH_SIZE` | 16 | Micro-batch size |
 | `MAX_NEW_TOKENS` | 1024 | Max generation length |
 
+### Evaluating AR (Transformer) models with process+outcome
+
+To evaluate LLaMA-Factory AR checkpoints with the **same** process+outcome scoring as DLLM (no penalty for extra steps), use `run_eval_ar.sh`. This uses the same `eval_pass128.py` with `--sampler_type ar` and writes `metrics.jsonl` under `results/transformer_eval/` so the ID-vs-OOD notebook picks them up.
+
+Relative model and output paths are resolved from `$YOUR_ROOT` / `PROJECT_ROOT`, so the examples below work from the repo root as written.
+
+```bash
+cd $YOUR_ROOT
+
+# pass@1 (quick)
+bash dllm/examples/gsm_infinity/run_eval_ar.sh \
+    LLaMA-Factory/saves/gsm_infinity/pt_200M_ar_20260223_120306 \
+    results/transformer_eval/pt_200M_ar_20260223_120306/checkpoint-final
+
+# pass@128 (full; use 3rd argument for k)
+bash dllm/examples/gsm_infinity/run_eval_ar.sh \
+    LLaMA-Factory/saves/gsm_infinity/pt_400M_ar_20260223_160500 \
+    results/transformer_eval/pt_400M_ar_20260223_160500/checkpoint-final 128
+```
+
+Output: `results/transformer_eval/<run_name>/checkpoint-<name>/metrics.jsonl` (same key format as DLLM: `val-aux/difficulty-5B/<op>/reward/pass@k`). The analysis notebook and `process_eval_results.py` will use these when present.
+
 ---
 
 ## 6. Generating Plots
