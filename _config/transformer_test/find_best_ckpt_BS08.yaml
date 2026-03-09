@@ -1,14 +1,14 @@
-RUN_name:
+RUN_NAME:
   - model1
   - model2
 
-checkpoint_to_run:
+CHECKPOINT_TO_RUN:
   - 9500
 
 BLOCK_SIZE_BD3LM:
   - 8
-  
-output_path: "/fast/bthambiraja/project/Interplay-LM-Reasoning/results"
+
+OUTPUT_PATH: "/fast/bthambiraja/project/Interplay-LM-Reasoning/results"
 
 CONDOR_JOB_CONFIG:
   # Resource requests
