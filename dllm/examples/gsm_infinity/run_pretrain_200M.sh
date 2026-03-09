@@ -25,7 +25,7 @@ set -e
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="${PROJECT_ROOT:-/fast/pmayilvahanan/Interplay-LM-Reasoning}"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
 VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
 

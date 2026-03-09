@@ -16,6 +16,16 @@ import functools
 import os
 from dataclasses import dataclass, field
 
+# Compatibility: datasets saved with newer versions use '_type': 'List', but
+# datasets 3.x only knows 'Sequence'. Register 'List' as an alias so
+# load_from_disk works without the slow arrow-file fallback.
+try:
+    from datasets.features.features import _FEATURE_TYPES
+    from datasets.features import Sequence as _Sequence
+    _FEATURE_TYPES.setdefault("List", _Sequence)
+except Exception:
+    pass
+
 import accelerate
 import torch
 import transformers
@@ -239,6 +249,45 @@ def _load_raw_jsonl(data_args, tokenizer, training_args):
     return DatasetDict({"train": split["train"], "test": split["test"]})
 
 
+def _load_from_arrow_files(dataset_path):
+    """Fallback: load arrow files via PyArrow directly, bypassing dataset_info.json.
+
+    Workaround for datasets version mismatch where saved metadata uses
+    ``"_type": "List"`` but the installed version only knows ``Sequence``.
+    Both load_from_disk and load_dataset("arrow", ...) consult dataset_info.json,
+    so we bypass both by reading raw Arrow IPC files with PyArrow.
+    """
+    import pyarrow as pa
+    from datasets import Dataset, DatasetDict
+
+    result = {}
+    for split in ["train", "test"]:
+        split_dir = os.path.join(dataset_path, split)
+        if not os.path.isdir(split_dir):
+            continue
+        arrow_files = sorted(
+            os.path.join(split_dir, f)
+            for f in os.listdir(split_dir)
+            if f.endswith(".arrow")
+        )
+        if not arrow_files:
+            continue
+        tables = []
+        for path in arrow_files:
+            with pa.memory_map(path, "r") as source:
+                tables.append(pa.ipc.open_stream(source).read_all())
+        full_table = pa.concat_tables(tables)
+        # Strip embedded HuggingFace metadata so Dataset infers features from
+        # the raw PyArrow schema (list<int32>) rather than the broken JSON
+        # metadata that still uses the old "_type": "List" key.
+        full_table = full_table.cast(full_table.schema.remove_metadata())
+        result[split] = Dataset(full_table)
+
+    if not result:
+        raise FileNotFoundError(f"No arrow files found under {dataset_path}")
+    return DatasetDict(result)
+
+
 def _load_from_tmp_shards(shards_dir, test_size=5000, seed=42):
     from datasets import DatasetDict, concatenate_datasets, load_from_disk
 
@@ -283,7 +332,14 @@ def _load_dataset(data_args, tokenizer, training_args):
                 logger.info("Loaded fully-saved pre-tokenized dataset.")
                 return dataset
         except Exception as e:
-            logger.warning(f"Failed to load saved dataset ({e}), trying _tmp_shards...")
+            logger.warning(f"Failed to load saved dataset ({e}), trying arrow files directly...")
+            try:
+                dataset = _load_from_arrow_files(dataset_path)
+                if "input_ids" in dataset["train"].column_names:
+                    logger.info("Loaded dataset from arrow files (datasets version workaround).")
+                    return dataset
+            except Exception as e2:
+                logger.warning(f"Arrow file fallback failed ({e2}), trying _tmp_shards...")
 
     tmp_shards_dir = os.path.join(dataset_path, "_tmp_shards")
     if os.path.isdir(tmp_shards_dir):

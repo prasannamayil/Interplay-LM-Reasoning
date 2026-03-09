@@ -61,6 +61,7 @@ def _compute_step_process_reward(
     step_weight: float,
     value_tolerance: float,
     zero_on_process_mismatch: bool = False,
+    penalize_extra_steps: bool = True,
 ) -> Dict[str, Any]:
     extra_info_dict = extra_info if isinstance(extra_info, dict) else {}
 
@@ -106,7 +107,8 @@ def _compute_step_process_reward(
                 + len(report["dependency_mismatches"])
                 + len(report["missing_in_pred"])
             )
-            structural_penalty += min(len(report["extra_in_pred"]), total_nodes)
+            if penalize_extra_steps:
+                structural_penalty += min(len(report["extra_in_pred"]), total_nodes)
             if report["answer_mismatch"] is not None:
                 structural_penalty += 1
             process_reward = max(0.0, 1.0 - structural_penalty / total_nodes)
@@ -254,6 +256,34 @@ def compute_score_with_step_process_strict(
         step_weight=step_weight,
         value_tolerance=value_tolerance,
         zero_on_process_mismatch=True,
+    )
+
+
+def compute_score_strict_allow_extra_steps(
+    solution_str: str,
+    ground_truth: Union[Dict, str],
+    data_source: Optional[str] = None,
+    extra_info: Optional[Dict[str, Any]] = None,
+    *,
+    answer_weight: float = 0.2,
+    step_weight: float = 0.8,
+    value_tolerance: float = 1e-6,
+) -> Dict[str, Any]:
+    """
+    Strict variant that zeros the reward when the process mismatches, but does NOT
+    penalize extra/unnecessary steps in the prediction — only missing required steps,
+    wrong values, and wrong dependencies count against the process reward.
+    """
+    _ = data_source
+    return _compute_step_process_reward(
+        solution_str=solution_str,
+        ground_truth=ground_truth,
+        extra_info=extra_info,
+        answer_weight=answer_weight,
+        step_weight=step_weight,
+        value_tolerance=value_tolerance,
+        zero_on_process_mismatch=True,
+        penalize_extra_steps=False,
     )
 
 

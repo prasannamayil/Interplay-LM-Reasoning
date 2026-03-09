@@ -22,9 +22,9 @@ CmdLine = <<JOB_COMMAND>>
 # <<<  end of input >>>>
 
 #### start of the script
-condor_scratch = $(_CONDOR_SCRATCH_DIR)
-executable = /usr/bin/apptainer
-arguments = exec --no-home --contain --writable-tmpfs --nv --bind /usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu --bind /usr/lib64:/usr/lib64 --bind /home/bthambiraja/projects/btraja-internship/external_repo:/home/bthambiraja/projects/btraja-internship/external_repo --bind /is/cluster/fast/bthambiraja/projects/btraja-internship/assets:/home/bthambiraja/projects/btraja-internship/assets --bind /is/cluster/fast/bthambiraja/projects/datasets:/home/bthambiraja/projects/datasets --bind /is/cluster/fast/bthambiraja/projects/btraja-internship/dump:/home/bthambiraja/projects/btraja-internship/dump --bind /is/cluster/fast/bthambiraja/tmp/:/tmp --bind $(condor_scratch):/home/bthambiraja/.cache  <<APPTAINER_IMG>> /bin/bash $(CmdLine)
+# condor_scratch = $(_CONDOR_SCRATCH_DIR)
+executable = /bin/bash
+arguments = $(CmdLine)
 
 # LOGS
 ### while change this path later
@@ -103,10 +103,10 @@ def main():
         # os.chmod(condor_fname, stat.S_IXOTH | stat.S_IWOTH | stat.S_IREAD | stat.S_IEXEC | stat.S_IXUSR | stat.S_IRUSR)  # make executable
         print(f"Condor file created at: {condor_fname}")
 
-        print(f"\n\nSubmitting jobs to condor...")
-        os.system("bash /home/bthambiraja/projects/btraja-internship/external_repo/hands_only/_rsync/sync_to_cluster.sh")
+        # print(f"\n\nSubmitting jobs to condor...")
+        # os.system("bash /home/bthambiraja/projects/btraja-internship/external_repo/hands_only/_rsync/sync_to_cluster.sh")
 
-        print("Called the following on the cluster: ")
+        # print("Called the following on the cluster: ")
 
         # cmd = f'cd {condor_job_config.PATH_TO_LAUNCH} && ' \
         #     f'echo $PWD > pwd.txt && ' \
@@ -117,9 +117,10 @@ def main():
         condor_jobs_to_submit.append(f"condor_submit_bid {args.bid} {condor_fname}")
 
         if args.submit:
-            ssh_cmd = ["ssh",]
-            ssh_cmd += ["bthambiraja@login.cluster.is.localnet"] + [cmd]
-            subprocess.call(["ssh", "bthambiraja@login.cluster.is.localnet"] + [cmd])
+            # ssh_cmd = ["ssh",]
+            # ssh_cmd += ["bthambiraja@login.cluster.is.localnet"] + [cmd]
+            # subprocess.call(["ssh", "bthambiraja@login.cluster.is.localnet"] + [cmd])
+            subprocess.call(cmd, shell=True)
 
         # break
     

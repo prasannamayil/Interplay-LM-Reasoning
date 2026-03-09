@@ -44,8 +44,8 @@ BLOCK_SIZE_BD3LM="${BLOCK_SIZE_BD3LM:-16}"
 # =============================================================================
 PROJECT_ROOT="${PROJECT_ROOT:-/home/bthambiraja/projects/Interplay-LM-Reasoning}"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
-VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
-TEST_DIR="${PROJECT_ROOT}/data/composition_hf/test_small"
+VENV="${VENV:-/fast/bthambiraja/projects/Interplay-LM-Reasoning/gsm_pretrain/bin/activate}"
+TEST_DIR="${TEST_DIR:-${PROJECT_ROOT}/data/composition_hf/test_small}"
 
 # =============================================================================
 # Environment Setup
@@ -63,8 +63,8 @@ echo "Steps:           ${STEPS}"
 echo "BD3LM block_size: ${BLOCK_SIZE_BD3LM}"
 echo "=============================================="
 
-# source "${VENV}"
-# export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
+source "${VENV}"
+export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
 cd "${DLLM_ROOT}"
 
 # Trim leading/trailing whitespace (guards against accidental trailing space after \ in caller)

@@ -1,9 +1,10 @@
 executable = /bin/bash
 
 # LOGS
-error  = /fast/bthambiraja/projects/Interplay-LM-Reasoning/logs_condor/$(ClusterId).$(ProcId).err
-output = /fast/bthambiraja/projects/Interplay-LM-Reasoning/logs_condor/$(ClusterId).$(ProcId).out
-log    = /fast/bthambiraja/projects/Interplay-LM-Reasoning/logs_condor/$(ClusterId).$(ProcId).log
+### while change this path later
+error  = /fast/bthambiraja/projects/LLMInterplay/logs_condor/$(ClusterId).$(ProcId).err
+output = /fast/bthambiraja/projects/LLMInterplay/logs_condor/$(ClusterId).$(ProcId).out
+log    = /fast/bthambiraja/projects/LLMInterplay/logs_condor/$(ClusterId).$(ProcId).log
 
 # CPU / MEMORY
 request_cpus = 64
@@ -12,8 +13,8 @@ request_disk = 1000G
 
 # GPU
 request_gpus = 8
+requirements = (TARGET.CUDAGlobalMemoryMb > 41000 ) && (TARGET.CUDAGlobalMemoryMb < 84000) && (UtsnameNodename =!= "i103")
 # requirements = (CUDADeviceName == "NVIDIA H100 80GB HBM3")
-# requirements = (TARGET.CUDAGlobalMemoryMb > 23000) &&  (TARGET.CUDAGlobalMemoryMb < 40000) && (UtsnameNodename =!= "i103")
 
 # EXIT SETTINGS
 on_exit_hold = (ExitCode =?= 3)
@@ -23,14 +24,6 @@ periodic_release = ( (JobStatus =?= 5) && (HoldReasonCode =?= 3) && (HoldReasonS
 
 # Retry this job 5 times if non-zero exit code
 # max_retries = 1
-
-# max running price
-# https://atlas.is.localnet/confluence/display/IT/Limit+the+running+price+of+a+job
-+MaxRunningPrice = 5000
-#+RunningPriceExceededAction = "restart"
-+RunningPriceExceededAction = "kill"
-
-# https://atlas.is.localnet/confluence/display/IT/How+to+limit+the+running+time+of+a+job+in+the+cluster
 
 # add to job to queue
 queue

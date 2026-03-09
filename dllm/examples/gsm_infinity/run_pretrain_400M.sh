@@ -29,7 +29,7 @@ set -e
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="${PROJECT_ROOT:-/fast/pmayilvahanan/Interplay-LM-Reasoning}"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
 VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
 
@@ -183,13 +183,13 @@ train_bd3lm() {
         --load_preprocessed_data True \
         --max_length 2048 \
         --insert_eos True \
-        --max_steps 10000 \
+        --max_steps 5000 \
         --learning_rate 1e-4 \
         --weight_decay 0.1 \
         --lr_scheduler_type cosine \
         --warmup_ratio 0.05 \
         --max_grad_norm 1.0 \
-        --per_device_train_batch_size 64 \
+        --per_device_train_batch_size 128 \
         --gradient_accumulation_steps 1 \
         --block_size "${BS}" \
         --attn_implementation flex_attention \

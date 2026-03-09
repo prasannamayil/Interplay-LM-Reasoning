@@ -25,6 +25,9 @@ LLaMA-Factory/saves/
 
 # Results (checkpoints are too large)
 results/
+.claude
+dllm/saves
+
 
 # WandB
 wandb/
