@@ -1,6 +1,6 @@
 # GSM-Infinity Diffusion LM Pre-training & Evaluation
 
-Pre-train and evaluate **A2D-MDLM** and **A2D-BD3LM** diffusion language models (~100M params, Qwen2 backbone) on the GSM-Infinity composition dataset (op 2-10, ~10B tokens), with pass@128 evaluation on the test set.
+Pre-train and evaluate **A2D-MDLM** and **A2D-BD3LM** diffusion language models (~100M params, Qwen2 backbone) on the GSM-Infinity composition dataset (op 2-10, ~10B tokens). Evaluation supports flexible **pass@k** (e.g. k=1, 8, 128) via the run script’s 4th argument or `--n_samples`.
 
 ## Overview
 
@@ -19,7 +19,7 @@ dllm/examples/gsm_infinity/
 ├── preprocess_data.py    # Convert composition_hf JSONL to HF dataset
 ├── pt_mdlm.py            # A2D-MDLM pre-training entry point
 ├── pt_bd3lm.py           # A2D-BD3LM pre-training entry point
-├── eval_pass128.py       # Pass@128 evaluation script
+├── eval_pass128.py       # Pass@k evaluation (k configurable)
 ├── run_pretrain.sh       # Training launch script
 ├── run_eval.sh           # Evaluation launch script
 └── README.md             # This file
@@ -138,46 +138,42 @@ accelerate launch \
 bash examples/gsm_infinity/run_pretrain.sh all
 ```
 
-### Step 3: Evaluate (Pass@128)
+### Step 3: Evaluate (pass@k)
 
-#### Evaluate A2D-MDLM
+Evaluation uses **process+outcome** scoring and supports any **pass@k** (k = number of samples per prompt). Larger k is more expensive; use k=1 for quick checks, k=8 or 128 for full metrics.
 
-```bash
-bash examples/gsm_infinity/run_eval.sh \
-    saves/gsm_infinity/a2d_mdlm_100M/checkpoint-final \
-    mdlm \
-    /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_mdlm_100M
-```
-
-#### Evaluate A2D-BD3LM
+#### Pass@1 (default, fast)
 
 ```bash
-bash examples/gsm_infinity/run_eval.sh \
-    saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final \
-    bd3lm \
-    /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_bd3lm_100M
+bash examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm> <output_dir>
+# Or explicitly: ... <output_dir> 1
 ```
 
-#### Custom evaluation parameters
+#### Pass@k via 4th argument (recommended)
 
 ```bash
-N_SAMPLES=128 BATCH_SIZE=8 TEMPERATURE=0.7 STEPS=256 \
-    bash examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm> <output_dir>
+# pass@8 (cheaper than 128)
+bash examples/gsm_infinity/run_eval.sh saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final bd3lm results/dllm_eval/a2d_bd3lm_100M 8
+
+# pass@128
+bash examples/gsm_infinity/run_eval.sh ... results/dllm_eval/... 128
 ```
 
-Or run the Python script directly:
+#### Custom env / Python
+
+```bash
+N_SAMPLES=128 TEMPERATURE=0.7 bash examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm> <output_dir>
+```
+
+Or run the Python script directly (e.g. pass@8):
 
 ```bash
 python examples/gsm_infinity/eval_pass128.py \
     --model_path <checkpoint_path> \
-    --sampler_type mdlm \
-    --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
-    --n_samples 128 \
-    --batch_size 16 \
-    --max_new_tokens 1024 \
-    --steps 256 \
-    --temperature 0.7 \
-    --output_dir results/dllm_eval/a2d_mdlm_100M
+    --sampler_type bd3lm \
+    --test_dir /path/to/data/composition_hf/test_small \
+    --n_samples 8 \
+    --output_dir results/dllm_eval/run_pass8
 ```
 
 ## Hyperparameters

@@ -6,6 +6,7 @@ import tyro
 import dllm
 
 A2D_CONFIG_MAP = {
+    "gpt_neox": dllm.pipelines.a2d.A2DGPTNeoXConfig,
     "llama": dllm.pipelines.a2d.A2DLlamaConfig,
     "qwen2": dllm.pipelines.a2d.A2DQwen2Config,
     "qwen3": dllm.pipelines.a2d.A2DQwen3Config,

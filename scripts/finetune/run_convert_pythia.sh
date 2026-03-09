@@ -1,0 +1,72 @@
+#!/bin/bash
+# =============================================================================
+# Convert Pythia (GPT-NeoX) models to A2D format for diffusion finetuning
+# =============================================================================
+# Usage:
+#   bash scripts/finetune/run_convert_pythia.sh
+# =============================================================================
+
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+DLLM_ROOT="${PROJECT_ROOT}/dllm"
+OUTPUT_BASE=".models/a2d"
+
+cd "$DLLM_ROOT"
+export PYTHONPATH="${DLLM_ROOT}:${PYTHONPATH:-}"
+
+MODELS=(
+    "EleutherAI/pythia-1.4b"
+    "EleutherAI/pythia-2.8b"
+    "EleutherAI/pythia-6.9b"
+)
+
+echo "============================================================"
+echo "Converting Pythia models to A2D format"
+echo "============================================================"
+
+for model in "${MODELS[@]}"; do
+    name=$(basename "$model")
+    output_dir="${OUTPUT_BASE}/${name}"
+
+    if [[ -f "${output_dir}/config.json" ]]; then
+        echo "[Skip] ${name} already converted at ${output_dir}"
+        continue
+    fi
+
+    echo "[Convert] ${model} -> ${output_dir}"
+    python dllm/pipelines/a2d/convert.py \
+        --model_name_or_path "${model}" \
+        --output_dir "${output_dir}"
+
+    python -c "
+import json
+from transformers import AutoTokenizer
+tokenizer = AutoTokenizer.from_pretrained('${output_dir}')
+# Add <|mask|> as the proper mask_token (not just additional_special_tokens)
+if tokenizer.mask_token is None or tokenizer.mask_token != '<|mask|>':
+    tokenizer.add_special_tokens({'mask_token': '<|mask|>'})
+# GPT-NeoX tokenizer has no chat template; add a minimal one for SFT
+if tokenizer.chat_template is None:
+    tokenizer.chat_template = (
+        '{% for message in messages %}'
+        '{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] + \"\n\" }}'
+        '{% elif message[\"role\"] == \"assistant\" %}{{ message[\"content\"] + eos_token }}'
+        '{% endif %}'
+        '{% endfor %}'
+        '{% if add_generation_prompt %}{% endif %}'
+    )
+tokenizer.save_pretrained('${output_dir}')
+with open('${output_dir}/config.json', 'r') as f:
+    config = json.load(f)
+config['mask_token_id'] = tokenizer.mask_token_id
+config['pad_token_id'] = tokenizer.eos_token_id
+config['use_cache'] = False
+with open('${output_dir}/config.json', 'w') as f:
+    json.dump(config, f, indent=2)
+print(f'  mask_token_id={config[\"mask_token_id\"]}')
+"
+    echo "[Done] ${name}"
+done
+
+echo "Conversion complete. A2D models under: ${DLLM_ROOT}/${OUTPUT_BASE}/"

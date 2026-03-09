@@ -300,14 +300,20 @@ def load_all(
             step = checkpoint_step(ckpt)
 
             if meta.eval_type == "transformer":
-                metrics_path = ckpt_dir / f"{ckpt}_metrics.json"
-                if not metrics_path.exists():
-                    cands = sorted(ckpt_dir.glob("*_metrics.json"))
-                    metrics_path = cands[0] if cands else metrics_path
-                if not metrics_path.exists():
-                    continue
-                mdata = _load_json(metrics_path)
-                extract_fn = lambda op, k: _extract_transformer_pass(mdata, op=op, k=k)
+                # Prefer metrics.jsonl (AR eval with process+outcome via eval_pass128.py --sampler_type ar)
+                metrics_jsonl = ckpt_dir / "metrics.jsonl"
+                if metrics_jsonl.exists():
+                    mdata = _load_metrics_jsonl(metrics_jsonl)
+                    extract_fn = lambda op, k: _extract_dllm_pass(mdata, op=op, k=k)
+                else:
+                    metrics_path = ckpt_dir / f"{ckpt}_metrics.json"
+                    if not metrics_path.exists():
+                        cands = sorted(ckpt_dir.glob("*_metrics.json"))
+                        metrics_path = cands[0] if cands else metrics_path
+                    if not metrics_path.exists():
+                        continue
+                    mdata = _load_json(metrics_path)
+                    extract_fn = lambda op, k: _extract_transformer_pass(mdata, op=op, k=k)
             else:
                 metrics_path = ckpt_dir / "metrics.jsonl"
                 if not metrics_path.exists():

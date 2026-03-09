@@ -59,10 +59,29 @@ def probit_inv(z):
 
 
 def load_lingua_eval(run_dir, model_type):
-    """Load lingua evaluation results (metrics.eval.jsonl or per-checkpoint)."""
+    """Load lingua evaluation results from multiple possible formats."""
     rows = []
 
-    # Try per-checkpoint structure under checkpoints/
+    # --- Format 1: per-checkpoint results.json (standalone eval output) ---
+    for ckpt_dir in sorted(run_dir.glob("checkpoints/*")) + sorted(run_dir.glob("*")):
+        if not ckpt_dir.is_dir():
+            continue
+        rf = ckpt_dir / "results.json"
+        if not rf.exists():
+            continue
+        data = json.loads(rf.read_text())
+        try:
+            step = int(ckpt_dir.name)
+        except ValueError:
+            step = 0
+        results = data.get("results", {})
+        row = _extract_from_lm_eval_results(results, step, model_type, run_dir.name)
+        rows.append(row)
+
+    if rows:
+        return rows
+
+    # --- Format 2: metrics.eval.jsonl (logged during training) ---
     ckpt_dirs = sorted(run_dir.glob("checkpoints/*"))
     if ckpt_dirs:
         for ckpt_dir in ckpt_dirs:
@@ -81,7 +100,7 @@ def load_lingua_eval(run_dir, model_type):
                 break
         return rows
 
-    # Single metrics file at run root
+    # --- Format 3: single metrics file at run root ---
     for mf_name in ["metrics.eval.jsonl", "metrics.jsonl"]:
         mf = run_dir / mf_name
         if mf.exists():
@@ -98,9 +117,34 @@ def load_lingua_eval(run_dir, model_type):
     return rows
 
 
-def _extract_lingua_row(metrics, step, model_type, run_name):
+def _extract_from_lm_eval_results(results, step, model_type, run_name):
+    """Extract metrics from lm_eval results dict: {task: {metric: value}}."""
     row = {"step": step, "model_type": model_type, "run_name": run_name}
     for task in TASKS:
+        task_data = results.get(task, {})
+        for key, col_suffix in [("acc,none", "_acc"), ("acc_norm,none", "_acc"),
+                                ("loss", "_nll")]:
+            col = f"{task}{col_suffix}"
+            if key in task_data and col not in row:
+                row[col] = task_data[key]
+    return row
+
+
+def _extract_lingua_row(metrics, step, model_type, run_name):
+    """Extract metrics from lingua jsonl format (flat or nested keys)."""
+    row = {"step": step, "model_type": model_type, "run_name": run_name}
+    for task in TASKS:
+        # Try nested format first: metrics[task]["acc,none"]
+        if task in metrics and isinstance(metrics[task], dict):
+            task_data = metrics[task]
+            for key, col_suffix in [("acc,none", "_acc"), ("acc_norm,none", "_acc"),
+                                    ("loss", "_nll")]:
+                col = f"{task}{col_suffix}"
+                if key in task_data and col not in row:
+                    row[col] = task_data[key]
+            continue
+
+        # Fall back to flat format: eval_harness/{task}/{metric}
         for key_suffix, col_suffix in [("acc,none", "_acc"), ("acc_norm,none", "_acc"),
                                         ("loss", "_nll")]:
             k = f"eval_harness/{task}/{key_suffix}"

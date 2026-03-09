@@ -1,0 +1,125 @@
+# =============================================================================
+# Interplay-LM-Reasoning — Comprehensive Requirements
+# =============================================================================
+# This file captures ALL Python dependencies across the project modules:
+#   dllm/, LLaMA-Factory/, lingua/, gsm_infinite/, analyze/, scripts/
+#
+# Pre-requisite (HPC module system):
+#   module load cuda/12.1
+#   module load cudnn/8.9.1-cu12.x
+#
+# Install PyTorch FIRST (before this file):
+#   pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+#       --index-url https://download.pytorch.org/whl/cu121
+#
+# Then:
+#   pip install -r requirements.txt
+#
+# Then install editable packages:
+#   pip install -e dllm/
+#   pip install -e "LLaMA-Factory/[torch,deepspeed,metrics]"
+#   pip install -e gsm_infinite/
+# =============================================================================
+
+# --------------- Core ML / Training ---------------
+transformers==4.57.0
+accelerate==1.11.0
+deepspeed==0.18.0
+peft==0.17.1
+datasets==4.2.0
+trl>=0.8.6,<=0.9.6
+tokenizers>=0.19.0,<=0.21.1
+sentencepiece==0.2.0
+torchmetrics
+einops
+
+# --------------- Configuration / CLI ---------------
+tyro
+omegaconf
+hydra-core
+pyyaml>=6.0.1
+pydantic<=2.10.6
+fire
+packaging
+protobuf
+
+# --------------- Experiment Tracking ---------------
+wandb
+
+# --------------- Data & Numerics ---------------
+numpy<2.0.0
+pandas>=2.0.0
+scipy
+seaborn
+
+# --------------- Visualization ---------------
+matplotlib>=3.7.0
+plotly
+rich
+
+# --------------- Hugging Face Ecosystem ---------------
+huggingface_hub
+hf-transfer
+safetensors<=0.5.3
+
+# --------------- Evaluation ---------------
+lm-eval
+nltk>=3.8.1
+rouge-chinese
+rouge-score
+
+# --------------- Tokenizers (extra) ---------------
+tiktoken
+regex
+
+# --------------- NLP / Text Processing ---------------
+beautifulsoup4
+html2text
+spacy
+sympy
+networkx
+pydot
+
+# --------------- API Clients (for gsm_infinite) ---------------
+openai>=1.0.0
+anthropic
+google-generativeai
+tenacity>=8.2.3
+wonderwords>=2.2.0
+
+# --------------- Serialization / IO ---------------
+orjson
+msgspec
+blobfile
+fsspec
+
+# --------------- Web / Serving (LLaMA-Factory) ---------------
+gradio>=4.38.0,<=5.42.0
+uvicorn
+fastapi
+sse-starlette
+
+# --------------- HPC / GPU Utilities ---------------
+pynvml
+ninja
+psutil
+
+# --------------- Misc ---------------
+tqdm>=4.65.0
+termcolor
+pytest
+viztracer
+
+# --------------- Optional (uncomment if needed) ---------------
+# flash-attn==2.8.3          # pip install flash-attn --no-build-isolation
+# bitsandbytes==0.48.1
+# vllm==0.8.5.post1
+# xformers                   # needed for lingua/ (pip install xformers)
+# causal-conv1d              # needed for lingua/mamba (git install)
+# mamba-ssm                  # needed for lingua/mamba (git install)
+# lmdb                       # needed for scripts/data_gen/
+# xxhash                     # needed for scripts/data_gen/
+# ujson                      # needed for scripts/data_gen/
+# ray                        # needed for scripts/data_gen/
+# datasketch                 # needed for scripts/data_gen/
+# datatrove                  # needed for lingua data pipeline

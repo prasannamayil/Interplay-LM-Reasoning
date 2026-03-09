@@ -38,24 +38,101 @@ export SHARED_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
 
 ### 1c. Set up the Python environment
 
+The project spans multiple modules (`dllm/`, `LLaMA-Factory/`, `lingua/`,
+`gsm_infinite/`, `analyze/`, `scripts/`) each with their own dependencies.
+A comprehensive `requirements.txt` at the repo root captures everything.
+
+#### Step 1: Load HPC CUDA modules
+
+These must be loaded **before** activating the venv (and every time you open
+a new shell). The cluster uses the `module` system:
+
 ```bash
-# Create a venv (once)
+module load cuda/12.1
+module load cudnn/8.9.1-cu12.x
+```
+
+#### Step 2: Create and activate the venv
+
+```bash
 cd $YOUR_ROOT
 python3 -m venv gsm_pretrain
 source gsm_pretrain/bin/activate
+pip install --upgrade pip setuptools wheel
+```
 
-# Install dependencies
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install transformers accelerate datasets wandb tqdm scipy seaborn
+#### Step 3: Install PyTorch (CUDA 12.1, H100-optimized)
 
-# Install dLLM in editable mode
+PyTorch must be installed **before** the requirements file (some packages
+depend on torch at install time):
+
+```bash
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu121
+```
+
+#### Step 4: Install all Python dependencies
+
+```bash
+cd $YOUR_ROOT
+pip install -r requirements.txt
+```
+
+#### Step 5: Install editable packages
+
+```bash
+# dLLM (diffusion language modeling)
 cd $YOUR_ROOT/dllm
 pip install -e .
 
-# Verify
+# LLaMA-Factory (transformer baselines)
+cd $YOUR_ROOT/LLaMA-Factory
+pip install -e ".[torch,deepspeed,metrics]"
+
+# gsm_infinite (data generation / evaluation benchmark)
+cd $YOUR_ROOT/gsm_infinite
+pip install -e .
+```
+
+#### Step 6: Install flash-attention (recommended for H100)
+
+```bash
+pip install flash-attn --no-build-isolation
+```
+
+#### Step 7: Verify
+
+```bash
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}, Devices: {torch.cuda.device_count()}')"
 python -c "import dllm; print('dllm OK')"
 python -c "import transformers; print('transformers OK')"
+python -c "import llamafactory; print('LLaMA-Factory OK')"
 ```
+
+#### Quick activation (subsequent sessions)
+
+After the initial setup, you just need to load modules + activate:
+
+```bash
+module load cuda/12.1
+module load cudnn/8.9.1-cu12.x
+source $YOUR_ROOT/gsm_pretrain/bin/activate
+export PYTHONPATH="$YOUR_ROOT:$PYTHONPATH"
+export WANDB_PROJECT="gsm-infinity-pretrain"
+
+# H100 multi-GPU optimizations
+export NCCL_P2P_DISABLE=0
+export NCCL_IB_DISABLE=0
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+```
+
+Or copy and adapt the existing `activate_pretrain_env.sh` at the repo root.
+
+> **Note on lingua/**: If you need to run lingua experiments (Mamba, MTP),
+> lingua has its own conda-based setup — see `lingua/setup/create_env.sh`.
+> It additionally requires `xformers`, and for Mamba: `causal-conv1d` and
+> `mamba-ssm` (installed from git). These are **not** included in the shared
+> venv because they can conflict with dLLM dependencies.
 
 ### 1d. Update hardcoded paths in scripts
 
@@ -115,7 +192,7 @@ $YOUR_ROOT/                                  # Your clone
 ├── dllm/
 │   ├── examples/gsm_infinity/               # Training & eval scripts
 │   │   ├── pt_bd3lm.py                     # BD3LM training entry point
-│   │   ├── eval_pass128.py                 # Evaluation (pass@1 or pass@128)
+│   │   ├── eval_pass128.py                 # Evaluation (pass@1 or pass@128); process+outcome scoring
 │   │   ├── run_pretrain_400M.sh            # Training launch script
 │   │   ├── run_eval.sh                     # Eval launch script
 │   │   └── HANDOFF_README.md               # This file
@@ -251,16 +328,30 @@ BD3LM experiments finish early and there is spare compute.
 The eval script computes pass@k for all op levels (2-20) and writes
 `metrics.jsonl` to the output directory.
 
-### Pass@1 evaluation (default — fast, ~20-30 min per checkpoint on 1 GPU)
+**Scoring**: A point is scored only when **both process and outcome** are correct.
+Process is checked via dependency-graph alignment with the gold solution (see
+`utils/solution_dependency_graph.py` and `verl/reward_fn.py`). Extra steps
+in the model output are **not** penalized—as long as the required steps and
+final answer match, the item scores 1. If the gold solution cannot be parsed
+for process checking, that example falls back to outcome-only.
+
+### Pass@k: 4th argument or N_SAMPLES
+
+**k** = number of samples per prompt. Pass@1 is fast (~20–30 min/checkpoint); pass@128 is expensive (~10–14 h). Use a smaller k (e.g. 8) for cheaper metrics.
 
 ```bash
 cd $YOUR_ROOT
 
-# Single checkpoint (block_size for eval should match training!)
+# pass@1 (default)
 BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
     dllm/saves/gsm_infinity/<run_name>/checkpoint-10000 \
     bd3lm \
     $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-10000
+
+# pass@k via 4th argument (e.g. k=8 or 128)
+BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
+    dllm/saves/gsm_infinity/<run_name>/checkpoint-10000 bd3lm \
+    $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-10000 8
 ```
 
 ### Evaluate multiple checkpoints (batch loop)
@@ -275,28 +366,51 @@ for CKPT in 5000 10000 15000 20000; do
         bd3lm \
         $YOUR_ROOT/results/dllm_eval/${RUN}/checkpoint-${CKPT}
 done
+# Add a 4th argument for pass@k, e.g. "8" or "128"
 ```
 
-### Pass@128 evaluation (optional — slow, ~12 hours per checkpoint)
+### Pass@128 (expensive)
 
 ```bash
-N_SAMPLES=128 TEMPERATURE=0.7 BLOCK_SIZE_BD3LM=16 \
-    bash dllm/examples/gsm_infinity/run_eval.sh \
-        dllm/saves/gsm_infinity/<run_name>/checkpoint-final \
-        bd3lm \
-        $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-final
+BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
+    dllm/saves/gsm_infinity/<run_name>/checkpoint-final \
+    bd3lm \
+    $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-final 128
+# Or: N_SAMPLES=128 TEMPERATURE=0.7 ... (no 4th arg)
 ```
 
 ### Environment variables for run_eval.sh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `N_SAMPLES` | 1 | Samples per prompt (1 for pass@1, 128 for pass@128) |
+| 4th arg / `N_SAMPLES` | 1 | k for pass@k (samples per prompt). Use 4th arg, e.g. `... output_dir 8` |
 | `STEPS` | 256 | Number of diffusion denoising steps |
-| `TEMPERATURE` | 0.0 | Sampling temp (0.0 = greedy for pass@1, 0.7 for pass@128) |
+| `TEMPERATURE` | 0.0 | Sampling temp (0.0 for pass@1; use 0.7 for pass@128) |
 | `BLOCK_SIZE_BD3LM` | 16 | BD3LM eval block size (**must match training block_size!**) |
 | `BATCH_SIZE` | 16 | Micro-batch size |
 | `MAX_NEW_TOKENS` | 1024 | Max generation length |
+
+### Evaluating AR (Transformer) models with process+outcome
+
+To evaluate LLaMA-Factory AR checkpoints with the **same** process+outcome scoring as DLLM (no penalty for extra steps), use `run_eval_ar.sh`. This uses the same `eval_pass128.py` with `--sampler_type ar` and writes `metrics.jsonl` under `results/transformer_eval/` so the ID-vs-OOD notebook picks them up.
+
+Relative model and output paths are resolved from `$YOUR_ROOT` / `PROJECT_ROOT`, so the examples below work from the repo root as written.
+
+```bash
+cd $YOUR_ROOT
+
+# pass@1 (quick)
+bash dllm/examples/gsm_infinity/run_eval_ar.sh \
+    LLaMA-Factory/saves/gsm_infinity/pt_200M_ar_20260223_120306 \
+    results/transformer_eval/pt_200M_ar_20260223_120306/checkpoint-final
+
+# pass@128 (full; use 3rd argument for k)
+bash dllm/examples/gsm_infinity/run_eval_ar.sh \
+    LLaMA-Factory/saves/gsm_infinity/pt_400M_ar_20260223_160500 \
+    results/transformer_eval/pt_400M_ar_20260223_160500/checkpoint-final 128
+```
+
+Output: `results/transformer_eval/<run_name>/checkpoint-<name>/metrics.jsonl` (same key format as DLLM: `val-aux/difficulty-5B/<op>/reward/pass@k`). The analysis notebook and `process_eval_results.py` will use these when present.
 
 ---
 
@@ -384,8 +498,9 @@ OOD-hard (op 17-20) averages, and saves `analyze/figures/id_vs_ood/id_vs_ood_pas
 
 | Evaluation | GPUs | Time per checkpoint |
 |-----------|------|---------------------|
-| pass@1 (N_SAMPLES=1) | 1x H100 | ~20-30 min |
-| pass@128 (N_SAMPLES=128) | 1x H100 | ~10-14 hours |
+| pass@1 (k=1, default) | 1x H100 | ~20-30 min |
+| pass@8 (k=8) | 1x H100 | ~3-4 hours |
+| pass@128 (k=128) | 1x H100 | ~10-14 hours |
 
 ---
 
