@@ -1,5 +1,5 @@
 """
-Finetune Pythia (GPT-NeoX) on Alpaca using HuggingFace Trainer.
+Finetune Pythia (GPT-NeoX) on an instruction dataset using HuggingFace Trainer.
 
 Usage (single node, 8 GPUs):
     torchrun --nproc_per_node=8 scripts/finetune/finetune_pythia.py \
@@ -15,7 +15,6 @@ import argparse
 import os
 
 import torch
-from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -24,49 +23,7 @@ from transformers import (
     TrainingArguments,
 )
 
-
-ALPACA_PROMPT = (
-    "Below is an instruction that describes a task, "
-    "paired with an input that provides further context. "
-    "Write a response that appropriately completes the request.\n\n"
-    "### Instruction:\n{instruction}\n\n"
-    "### Input:\n{input}\n\n"
-    "### Response:\n"
-)
-
-ALPACA_PROMPT_NO_INPUT = (
-    "Below is an instruction that describes a task. "
-    "Write a response that appropriately completes the request.\n\n"
-    "### Instruction:\n{instruction}\n\n"
-    "### Response:\n"
-)
-
-
-def build_alpaca_prompt(example):
-    if example.get("input", "").strip():
-        return ALPACA_PROMPT.format(
-            instruction=example["instruction"], input=example["input"]
-        )
-    return ALPACA_PROMPT_NO_INPUT.format(instruction=example["instruction"])
-
-
-def tokenize_fn(example, tokenizer, max_length):
-    prompt = build_alpaca_prompt(example)
-    response = (example.get("output", "") or "").strip()
-    full_text = prompt + response + tokenizer.eos_token
-
-    tokenized = tokenizer(
-        full_text, truncation=True, max_length=max_length, return_tensors=None
-    )
-    prompt_ids = tokenizer(
-        prompt, truncation=True, max_length=max_length, return_tensors=None
-    )["input_ids"]
-
-    labels = tokenized["input_ids"].copy()
-    labels[: len(prompt_ids)] = [-100] * len(prompt_ids)
-
-    tokenized["labels"] = labels
-    return tokenized
+from sft_dataset import load_dataset_for_ar, tokenize_sft_example
 
 
 def main():
@@ -81,14 +38,17 @@ def main():
         type=str,
         default="tatsu-lab/alpaca",
     )
+    parser.add_argument("--load_preprocessed_data", action="store_true", default=False)
     parser.add_argument("--output_dir", type=str, default="results/finetune/pythia-2.8b-alpaca")
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--per_device_train_batch_size", type=int, default=4)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
     parser.add_argument("--save_steps", type=int, default=200)
+    parser.add_argument("--eval_steps", type=int, default=200)
     parser.add_argument("--save_total_limit", type=int, default=20)
     parser.add_argument("--bf16", action="store_true", default=False)
     parser.add_argument("--logging_steps", type=int, default=10)
@@ -104,24 +64,35 @@ def main():
         torch_dtype=torch.float32,
     )
 
-    dataset = load_dataset(args.dataset, split="train")
-    dataset = dataset.map(
-        lambda ex: tokenize_fn(ex, tokenizer, args.max_length),
-        num_proc=8,
-        remove_columns=dataset.column_names,
-        desc="Tokenizing",
+    dataset = load_dataset_for_ar(
+        args.dataset,
+        load_preprocessed_data=args.load_preprocessed_data,
     )
+    train_columns = dataset["train"].column_names
+    if not {"input_ids", "labels"}.issubset(set(train_columns)):
+        dataset = dataset.map(
+            lambda ex: tokenize_sft_example(ex, tokenizer, args.max_length),
+            num_proc=8,
+            remove_columns=train_columns,
+            desc="Tokenizing",
+        )
+    train_dataset = dataset["train"]
+    eval_dataset = dataset.get("test", None)
+    evaluation_strategy = "steps" if eval_dataset is not None else "no"
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         warmup_ratio=args.warmup_ratio,
         lr_scheduler_type=args.lr_scheduler_type,
         bf16=args.bf16,
         logging_steps=args.logging_steps,
+        evaluation_strategy=evaluation_strategy,
+        eval_steps=args.eval_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         report_to="wandb",
@@ -137,7 +108,8 @@ def main():
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         data_collator=DataCollatorForSeq2Seq(
             tokenizer, padding=True, return_tensors="pt"
