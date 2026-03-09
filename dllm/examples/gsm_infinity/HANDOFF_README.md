@@ -192,7 +192,7 @@ $YOUR_ROOT/                                  # Your clone
 ├── dllm/
 │   ├── examples/gsm_infinity/               # Training & eval scripts
 │   │   ├── pt_bd3lm.py                     # BD3LM training entry point
-│   │   ├── eval_pass128.py                 # Evaluation (pass@1 or pass@128)
+│   │   ├── eval_pass128.py                 # Evaluation (pass@1 or pass@128); process+outcome scoring
 │   │   ├── run_pretrain_400M.sh            # Training launch script
 │   │   ├── run_eval.sh                     # Eval launch script
 │   │   └── HANDOFF_README.md               # This file
@@ -328,16 +328,30 @@ BD3LM experiments finish early and there is spare compute.
 The eval script computes pass@k for all op levels (2-20) and writes
 `metrics.jsonl` to the output directory.
 
-### Pass@1 evaluation (default — fast, ~20-30 min per checkpoint on 1 GPU)
+**Scoring**: A point is scored only when **both process and outcome** are correct.
+Process is checked via dependency-graph alignment with the gold solution (see
+`utils/solution_dependency_graph.py` and `verl/reward_fn.py`). Extra steps
+in the model output are **not** penalized—as long as the required steps and
+final answer match, the item scores 1. If the gold solution cannot be parsed
+for process checking, that example falls back to outcome-only.
+
+### Pass@k: 4th argument or N_SAMPLES
+
+**k** = number of samples per prompt. Pass@1 is fast (~20–30 min/checkpoint); pass@128 is expensive (~10–14 h). Use a smaller k (e.g. 8) for cheaper metrics.
 
 ```bash
 cd $YOUR_ROOT
 
-# Single checkpoint (block_size for eval should match training!)
+# pass@1 (default)
 BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
     dllm/saves/gsm_infinity/<run_name>/checkpoint-10000 \
     bd3lm \
     $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-10000
+
+# pass@k via 4th argument (e.g. k=8 or 128)
+BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
+    dllm/saves/gsm_infinity/<run_name>/checkpoint-10000 bd3lm \
+    $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-10000 8
 ```
 
 ### Evaluate multiple checkpoints (batch loop)
@@ -352,25 +366,26 @@ for CKPT in 5000 10000 15000 20000; do
         bd3lm \
         $YOUR_ROOT/results/dllm_eval/${RUN}/checkpoint-${CKPT}
 done
+# Add a 4th argument for pass@k, e.g. "8" or "128"
 ```
 
-### Pass@128 evaluation (optional — slow, ~12 hours per checkpoint)
+### Pass@128 (expensive)
 
 ```bash
-N_SAMPLES=128 TEMPERATURE=0.7 BLOCK_SIZE_BD3LM=16 \
-    bash dllm/examples/gsm_infinity/run_eval.sh \
-        dllm/saves/gsm_infinity/<run_name>/checkpoint-final \
-        bd3lm \
-        $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-final
+BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
+    dllm/saves/gsm_infinity/<run_name>/checkpoint-final \
+    bd3lm \
+    $YOUR_ROOT/results/dllm_eval/<run_name>/checkpoint-final 128
+# Or: N_SAMPLES=128 TEMPERATURE=0.7 ... (no 4th arg)
 ```
 
 ### Environment variables for run_eval.sh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `N_SAMPLES` | 1 | Samples per prompt (1 for pass@1, 128 for pass@128) |
+| 4th arg / `N_SAMPLES` | 1 | k for pass@k (samples per prompt). Use 4th arg, e.g. `... output_dir 8` |
 | `STEPS` | 256 | Number of diffusion denoising steps |
-| `TEMPERATURE` | 0.0 | Sampling temp (0.0 = greedy for pass@1, 0.7 for pass@128) |
+| `TEMPERATURE` | 0.0 | Sampling temp (0.0 for pass@1; use 0.7 for pass@128) |
 | `BLOCK_SIZE_BD3LM` | 16 | BD3LM eval block size (**must match training block_size!**) |
 | `BATCH_SIZE` | 16 | Micro-batch size |
 | `MAX_NEW_TOKENS` | 1024 | Max generation length |
@@ -461,8 +476,9 @@ OOD-hard (op 17-20) averages, and saves `analyze/figures/id_vs_ood/id_vs_ood_pas
 
 | Evaluation | GPUs | Time per checkpoint |
 |-----------|------|---------------------|
-| pass@1 (N_SAMPLES=1) | 1x H100 | ~20-30 min |
-| pass@128 (N_SAMPLES=128) | 1x H100 | ~10-14 hours |
+| pass@1 (k=1, default) | 1x H100 | ~20-30 min |
+| pass@8 (k=8) | 1x H100 | ~3-4 hours |
+| pass@128 (k=128) | 1x H100 | ~10-14 hours |
 
 ---
 

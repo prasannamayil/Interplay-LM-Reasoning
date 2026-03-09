@@ -3,16 +3,17 @@
 # Evaluation Script for DLLM Models on GSM-Infinity
 # =============================================================================
 # Evaluates a trained DLLM checkpoint on composition_hf/test_small.
-# Default: pass@1 (N_SAMPLES=1). Set N_SAMPLES=128 for pass@128.
+# Default: pass@1. Use 4th argument or N_SAMPLES for pass@k (e.g. k=8 is cheaper than 128).
 #
 # Usage:
-#   # Evaluate a BD3LM checkpoint (pass@1, default)
-#   bash dllm/examples/gsm_infinity/run_eval.sh \
-#       saves/gsm_infinity/a2d_bd3lm_400M_bs16_.../checkpoint-5000 \
-#       bd3lm \
-#       results/dllm_eval/a2d_bd3lm_400M_bs16_.../checkpoint-5000
+#   # pass@1 (default)
+#   bash dllm/examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm> <output_dir>
 #
-#   # Evaluate with pass@128
+#   # pass@k via 4th argument (recommended)
+#   bash dllm/examples/gsm_infinity/run_eval.sh <model_path> <mdlm|bd3lm> <output_dir> <k>
+#   # Examples: ... output_dir 1   (pass@1),   ... output_dir 8   (pass@8),   ... output_dir 128 (pass@128)
+#
+#   # pass@k via env (alternative)
 #   N_SAMPLES=128 bash dllm/examples/gsm_infinity/run_eval.sh ...
 #
 #   # Sweep diffusion steps
@@ -30,9 +31,12 @@ set -e
 MODEL_PATH="${1:?Error: Model path required as first argument}"
 SAMPLER_TYPE="${2:?Error: Sampler type required (mdlm or bd3lm)}"
 OUTPUT_DIR="${3:?Error: Output directory required as third argument}"
-
-# Optional arguments with defaults (pass@1 focused)
-N_SAMPLES="${N_SAMPLES:-1}"
+# Optional 4th: k for pass@k (samples per prompt). Overrides N_SAMPLES.
+if [ -n "${4:-}" ]; then
+    N_SAMPLES="${4}"
+else
+    N_SAMPLES="${N_SAMPLES:-1}"
+fi
 BATCH_SIZE="${BATCH_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 STEPS="${STEPS:-256}"
@@ -53,6 +57,7 @@ TEST_DIR="${PROJECT_ROOT}/data/composition_hf/test_small"
 echo "=============================================="
 echo "DLLM Pass@${N_SAMPLES} Evaluation"
 echo "=============================================="
+echo "Pass@k: k=${N_SAMPLES} (use 4th arg or N_SAMPLES for different k)"
 echo "Model:           ${MODEL_PATH}"
 echo "Sampler:         ${SAMPLER_TYPE}"
 echo "Output:          ${OUTPUT_DIR}"

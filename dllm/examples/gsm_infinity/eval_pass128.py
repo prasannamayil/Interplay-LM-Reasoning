@@ -1,8 +1,13 @@
 """
 Pass@128 evaluation for diffusion language models on GSM-Infinity test_small.
 
-For each test example, generates N completions using the DLLM sampler,
-extracts answers, and computes pass@k for k in {1,2,4,8,16,32,64,128}.
+Scoring: a point is scored only when both process and outcome are correct.
+Extra steps in the generated solution are not penalized. When gold solution
+cannot be parsed for process checking, falls back to outcome-only for that example.
+
+For each test example, generates n_samples completions (k for pass@k) using the
+DLLM sampler, then computes pass@j for j in {1,2,4,8,...} up to n_samples.
+Use --n_samples 1 for fast pass@1; --n_samples 8 or 128 for pass@8 / pass@128.
 
 Usage:
     source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
@@ -43,6 +48,12 @@ import dllm
 from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
 from dllm.core.samplers.bd3lm import BD3LMSampler, BD3LMSamplerConfig
 
+# Optional: process (dependency-graph) scoring. Requires repo root on PYTHONPATH.
+try:
+    from verl.reward_fn import parse_graph
+except ImportError:
+    parse_graph = None
+
 
 # ============================================================================
 # Answer extraction (from verl/reward_fn.py)
@@ -62,10 +73,52 @@ def extract_answer(text: str) -> str:
     return ""
 
 
+def _normalise_answer(text: str) -> str:
+    return (text or "").strip().rstrip(".")
+
+
 def check_answer(generated_text: str, gold_answer: str) -> bool:
-    """Check if the generated answer matches the gold answer."""
+    """Check if the generated answer matches the gold answer (outcome only)."""
     answer = extract_answer(generated_text)
-    return answer.strip().rstrip(".") == gold_answer.strip().rstrip(".")
+    return _normalise_answer(answer) == _normalise_answer(gold_answer)
+
+
+def check_process_and_outcome(
+    generated_text: str,
+    example: dict,
+    value_tolerance: float = 1e-6,
+) -> bool:
+    """
+    Score 1 iff both process and outcome are correct. Extra steps in the
+    generated solution are not penalized. If gold has no parseable solution,
+    falls back to outcome-only for that example.
+    """
+    gold_answer = get_gold_answer(example)
+    gold_solution = (example.get("solution") or "").strip()
+
+    outcome_ok = _normalise_answer(extract_answer(generated_text)) == _normalise_answer(gold_answer)
+
+    if not gold_solution or parse_graph is None:
+        return outcome_ok
+
+    try:
+        gold_graph = parse_graph(gold_solution)
+    except Exception:
+        return outcome_ok
+
+    try:
+        pred_graph = parse_graph(generated_text)
+    except Exception:
+        return False
+
+    report = gold_graph.compare(pred_graph, value_tolerance=value_tolerance)
+    # Process correct: no wrong/missing steps. Do NOT penalize extra steps.
+    process_ok = (
+        len(report["value_mismatches"]) == 0
+        and len(report["dependency_mismatches"]) == 0
+        and len(report["missing_in_pred"]) == 0
+    )
+    return outcome_ok and process_ok
 
 
 # ============================================================================
@@ -185,6 +238,9 @@ def evaluate(
     print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
     print(f"Sampler type: {sampler_type}")
     print(f"Temperature: {temperature}, Steps: {steps}, Max new tokens: {max_new_tokens}")
+    print(f"Scoring: process+outcome (both required; extra steps not penalized)")
+    if parse_graph is None:
+        print("WARNING: verl.reward_fn.parse_graph not available; using outcome-only scoring.")
 
     # --- Create sampler ---
     if sampler_type == "mdlm":
@@ -267,7 +323,7 @@ def evaluate(
                         gen_ids = [t for t in gen_ids if t != mask_id]
 
                     generated_text = tokenizer.decode(gen_ids, skip_special_tokens=False)
-                    correct = check_answer(generated_text, gold_answer)
+                    correct = check_process_and_outcome(generated_text, example)
                     all_correct.append(correct)
 
             n_correct = sum(all_correct)
@@ -351,7 +407,7 @@ def main():
     )
     parser.add_argument(
         "--n_samples", type=int, default=1,
-        help="Number of samples per prompt (default: 1; set 128 for pass@128)",
+        help="Samples per prompt = k for pass@k (default: 1; e.g. 8 or 128 for pass@8 / pass@128)",
     )
     parser.add_argument(
         "--output_dir", type=str, required=True,
