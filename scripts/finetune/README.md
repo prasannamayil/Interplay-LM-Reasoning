@@ -1,212 +1,190 @@
 # Generalization Trends: AR vs Diffusion LMs
 
-Finetune pretrained AR models (Pythia, Mamba) and their diffusion counterparts
-(Pythia-BD3LM, Pythia-MDLM) on Alpaca, evaluate on lm-eval-harness benchmarks
-at each checkpoint, and compare generalization trends (acc vs acc) across
-model families.
+This directory contains the finetune and evaluation pipeline used to compare
+autoregressive models (Pythia, Mamba) against diffusion language models
+(BD3LM, MDLM) under matched supervised finetuning setups.
 
-## Hypothesis
+The current pipeline supports:
 
-Autoregressive models (Pythia, Mamba) trained with next-token prediction exhibit
-similar generalization trends (benchmark accuracy correlations), while diffusion
-LMs (BD3LM, MDLM) show fundamentally different trends due to their non-causal
-training objective.
+- pretrained `checkpoint-base` evaluation,
+- checkpoint sweeps for `cloze`, `reasoning_gen`, and `code_gen` task groups,
+- dense training-curve reconstruction from `trainer_state.json`,
+- dataset presets for `alpaca-control`, `reasoning-small`, and `code-small`.
 
-## Models
+## Main scripts
 
-All base models are trained on The Pile with the same GPT-NeoX tokenizer:
-
-| Model | Type | Source | Sizes |
-|-------|------|--------|-------|
-| Pythia | AR (NTP) | `EleutherAI/pythia-{1.4b,2.8b,6.9b}` | 1.4B, 2.8B, 6.9B |
-| Mamba | SSM (AR) | `state-spaces/mamba-{1.4b,2.8b}-hf` | 1.4B, 2.8B |
-| Pythia-BD3LM | Block Diffusion | Pythia converted to A2D-GPTNeoX | 1.4B, 2.8B, 6.9B |
-| Pythia-MDLM | Masked Diffusion | Pythia converted to A2D-GPTNeoX | 1.4B, 2.8B, 6.9B |
-
-## Quick Start
-
-Two scripts, designed to run on **two separate nodes in parallel**:
+### Train + evaluate one side
 
 ```bash
-# Node 1: AR models (Pythia + Mamba) -- train then eval
+# Node 1: AR models
 bash scripts/finetune/run_ar.sh 2.8b
 
-# Node 2: Diffusion models (BD3LM + MDLM) -- train then eval
+# Node 2: Diffusion models
 bash scripts/finetune/run_diffusion.sh 2.8b
 ```
 
-After both finish, plot the generalization trends:
+Both launchers accept the same environment overrides:
 
 ```bash
-python analyze/results_finetune.py --save-dir plots/finetune
+DATASET_SPEC="tatsu-lab/alpaca[train:10000,test:1000]"
+DATASET_TAG="alpaca-control"
+EVAL_TASK_GROUPS="cloze,reasoning_gen,code_gen"
+INCLUDE_BASE=1
+SAVE_STEPS=200
+NUM_TRAIN_EPOCHS=3
 ```
 
-All models share the **GPT-NeoX-20B tokenizer** (from The Pile), making accuracy
-metrics directly comparable. This is NOT the GSM-Infinity simple tokenizer (2200 vocab).
-
-## Step-by-Step Guide
-
-### 1. Download pretrained models
+### Run the clean comparison matrix
 
 ```bash
-bash scripts/finetune/download_models.sh
+bash scripts/finetune/run_clean_matrix.sh 2.8b ar
+bash scripts/finetune/run_clean_matrix.sh 2.8b diffusion
 ```
 
-Downloads Pythia (1.4B, 2.8B, 6.9B) and Mamba (1.4B, 2.8B) from HuggingFace.
+The matrix runner iterates these dataset presets by default:
 
-### 2. Convert Pythia to A2D format (for diffusion)
+- `alpaca-control`
+- `reasoning-small`
+- `code-small`
+
+and reuses the existing launchers with matched checkpoint cadence and
+`checkpoint-base` evaluation enabled.
+
+## Dataset presets
+
+Dataset presets live in `scripts/finetune/dataset_presets.sh`.
+
+Current defaults:
+
+- `alpaca-control`
+  - `tatsu-lab/alpaca[train:10000,test:1000]`
+- `reasoning-small`
+  - `nvidia/OpenMathInstruct-2[train:10000,test:1000]`
+- `code-small`
+  - `OpenCoder-LLM/opc-sft-stage2[name:educational_instruct,lang:python][train:10000,test:1000]`
+
+The AR finetune scripts now use the same normalized SFT dataset path as the
+DLLM scripts, so the same dataset spec can be passed to all model families.
+
+## Finetune scripts
+
+### AR
 
 ```bash
-bash scripts/finetune/run_convert_pythia.sh
+DATASET_SPEC="tatsu-lab/alpaca" DATASET_TAG="alpaca" \
+    bash scripts/finetune/run_finetune_pythia.sh 2.8b
+
+DATASET_SPEC="nvidia/OpenMathInstruct-2[train:10000,test:1000]" \
+DATASET_TAG="reasoning-small" \
+    bash scripts/finetune/run_finetune_mamba.sh 2.8b
 ```
 
-Converts each Pythia checkpoint to an A2D-GPTNeoX model with bidirectional
-attention, adds a `<|mask|>` token, and saves under `dllm/.models/a2d/`.
-
-### 3. Finetune
-
-Run each model type individually:
+### Diffusion
 
 ```bash
-# AR models
-bash scripts/finetune/run_finetune_pythia.sh 2.8b
-bash scripts/finetune/run_finetune_mamba.sh 2.8b
+DATASET_SPEC="OpenCoder-LLM/opc-sft-stage2[name:educational_instruct,lang:python][train:10000,test:1000]" \
+DATASET_TAG="code-small" \
+    bash scripts/finetune/run_finetune_bd3lm.sh 2.8b 32
 
-# Diffusion models
-bash scripts/finetune/run_finetune_bd3lm.sh 2.8b 32
-bash scripts/finetune/run_finetune_mdlm.sh 2.8b
+DATASET_SPEC="tatsu-lab/alpaca[train:10000,test:1000]" DATASET_TAG="alpaca-control" \
+    bash scripts/finetune/run_finetune_mdlm.sh 2.8b
 ```
 
-Or run all at once:
+Useful overrides shared by the train launchers:
 
-```bash
-bash scripts/finetune/run_finetune_all.sh 2.8b
-```
+- `DATASET_SPEC`
+- `DATASET_TAG`
+- `NUM_TRAIN_EPOCHS`
+- `SAVE_STEPS`
+- `MAX_LENGTH`
+- `OUTPUT_DIR_OVERRIDE`
+- `LOAD_PREPROCESSED_DATA=1` for AR runs using a preprocessed local SFT dataset
 
-Training outputs are saved to `results/finetune/<model>-<size>-alpaca/` with
-checkpoints at regular intervals.
-
-**Hardware**: 8x H100 GPUs. Pythia uses FSDP, Mamba uses DDP, BD3LM/MDLM use
-ZeRO-2 via accelerate.
-
-### 4. Evaluate checkpoints
+## Checkpoint evaluation
 
 ```bash
 bash scripts/finetune/eval_checkpoints.sh <model_type> <run_dir>
 ```
 
-Where `model_type` is one of: `pythia`, `mamba`, `bd3lm`, `mdlm`.
+Where `model_type` is one of:
 
-Evaluates on: hellaswag, arc_easy, arc_challenge, piqa, winogrande,
-openbookqa, mmlu, commonsense_qa.
+- `pythia`
+- `mamba`
+- `bd3lm`
+- `mdlm`
 
-Results are saved to `results/finetune_eval/<model_type>/<run_name>/`.
+Important environment overrides:
 
-**Environment variables**:
-- `GPU_LIST`: comma-separated GPU IDs (default: `0,1,2,3,4,5,6,7`)
-- `NUM_CKPTS`: max checkpoints to evaluate (default: `10`)
-- `BLOCK_SIZE`: BD3LM block size (default: `32`)
-- `MC_NUM`: MC samples for diffusion loglikelihood (default: `128`)
+- `TASK_GROUP=cloze|reasoning_gen|code_gen|all`
+- `INCLUDE_BASE=1` to add pretrained `checkpoint-base`
+- `BASE_MODEL=/path/or/hf-id` to override the inferred base model
+- `NUM_CKPTS=12`
+- `GPU_LIST=0,1,2,3,4,5,6,7`
+- `AR_BATCH_SIZE=auto`
+- `DIFF_BATCH_SIZE=32`
+- `BLOCK_SIZE=32`
+- `MC_NUM=32`
+- `LONG_STEPS=256`
+- `LONG_MAX_NEW_TOKENS=256`
 
-### 5. Analyze and plot
+Task groups:
+
+- `cloze`
+  - `hellaswag, arc_easy, arc_challenge, piqa, winogrande, openbookqa, mmlu, commonsense_qa`
+- `reasoning_gen`
+  - `gsm8k_cot`, `bbh`
+- `code_gen`
+  - `humaneval_instruct`, `mbpp_instruct`
+
+Results are written under:
+
+```text
+results/finetune_eval/<model_type>/<run_name>/checkpoint-*/
+```
+
+For generative task groups, the per-task outputs are nested under
+`checkpoint-*/<group>/<task>/...` so reruns stay idempotent even when the
+few-shot settings differ across tasks.
+
+## Analysis
 
 ```bash
-python analyze/results_finetune.py --save-dir plots/finetune
+python analyze/results_finetune.py --save-dir plots/finetune --task-group all
 ```
 
-Generates:
-- Benchmark-vs-benchmark scatter plots (e.g., ARC-Easy vs ARC-Challenge)
-- Training curves (accuracy vs step) per model family
-- Summary table of max accuracies
+The analysis script now:
 
-## Loss comparability: why Pythia / BD3LM / Mamba look so different
+- loads all result JSONs recursively under each checkpoint directory,
+- merges per-task outputs from cloze and generative sweeps,
+- treats `checkpoint-base` as step `0`,
+- orders `checkpoint-final` after the highest numeric checkpoint,
+- loads dense `trainer_state.json` logs from `results/finetune`,
+- exports CSVs alongside the plots.
 
-Training curves are **not directly comparable** across the three setups:
+Expected outputs include:
 
-| Model type | What “loss” measures | Typical scale |
-|------------|----------------------|---------------|
-| **Pythia** (AR) | Mean cross-entropy per **target token** (next-token prediction). | ~2–4 (NLL); ppl ~10–60. |
-| **BD3LM** | Diffusion objective: weighted CE over **masked tokens only**, normalized by `loss_norm_type`. Logged **nll**/**ppl** are a *proxy*: (sum of CE on masked positions) / (total valid tokens)—**not** sequence NLL or AR perplexity; true sequence log-probability under the diffusion model would require an ELBO or sampling. | Proxy only; not comparable to AR ppl. |
-| **Mamba** (AR) | Should be mean CE per token (same as Pythia) **if** the same Trainer and data are used. | Should be in the same range as Pythia. |
+- `ft_cloze_anchor_vs_tasks.png`
+- `ft_cloze_progress.png`
+- `ft_reasoning_gen_anchor_vs_tasks.png`
+- `ft_reasoning_gen_progress.png`
+- `ft_code_gen_anchor_vs_tasks.png`
+- `ft_code_gen_progress.png`
+- `ft_dense_training_metrics.png`
+- `ft_eval_rows.csv`
+- `ft_train_rows.csv`
+- `ft_eval_with_training_metrics.csv`
 
-So:
+## Notes on loss comparability
 
-- **BD3LM “loss” is a different quantity** (masked, timestep-weighted). Do not compare its raw value to Pythia/Mamba.
-- **Pythia and Mamba** are both causal LM; if they use the same data and tokenizer (GPT-NeoX, Alpaca), their **reported loss** should be on a similar scale. If Mamba shows ~40 while Pythia shows ~2.5 on the same run setup, likely causes are:
-  - **Loss reduction**: Mamba’s `MambaForCausalLM` might return **sum** over tokens instead of **mean**. Then “loss” ≈ mean_NLL × num_tokens_per_batch, which can be large.
-  - **Learning rate / optimization**: Mamba may need a different LR or schedule (see below).
+Raw training loss is not directly comparable across all model families:
 
-To make training **roughly comparable**:
+- Pythia and Mamba are both causal LM setups, so their per-token held-out loss
+  should be comparable when the same tokenizer and finetune data are used.
+- BD3LM and MDLM optimize diffusion objectives, so their logged loss is not the
+  same quantity as autoregressive cross-entropy.
 
-1. **Same distribution**: Use the same dataset and tokenizer for all (you already do for Alpaca + GPT-NeoX for Pythia/Mamba; BD3LM uses the same data but a different objective).
-2. **Comparable metrics**: Log **per-token NLL** and **perplexity** (e.g. `exp(mean_nll)`) for every run. For Pythia this is the default “loss” when it’s mean CE; for Mamba, add a callback that evaluates the same (mean CE on labels), or confirm the model returns mean loss.
-3. **Epochs**: Same number of epochs (or same number of gradient steps) across Pythia, Mamba, and BD3LM so that “amount of data seen” is aligned.
-4. **Mamba**: If loss stays very high and flat, try **higher learning rate** (e.g. 5e-5 or 1e-4 with warmup) and/or verify that the logged loss is **mean** over tokens, not sum.
+For that reason, the most robust comparisons are:
 
-## Evaluation Details
-
-All models are evaluated using the lm-evaluation-harness with loglikelihood-based
-accuracy (cloze-style):
-
-- **AR models** (Pythia, Mamba): standard next-token log-probabilities per
-  candidate; the candidate with highest log-likelihood is selected.
-- **Diffusion models** (BD3LM, MDLM): Monte Carlo ELBO estimate of
-  log-likelihood per candidate via the same selection mechanism.
-
-Both approaches produce comparable `acc` and `acc_norm` metrics, enabling
-direct accuracy-vs-accuracy comparison across model families.
-
-## Directory Structure
-
-```
-scripts/finetune/
-    README.md                       # This file
-    run_ar.sh                       # >>> NODE 1: Pythia + Mamba train + eval
-    run_diffusion.sh                # >>> NODE 2: BD3LM + MDLM train + eval
-    download_models.sh              # Download Pythia + Mamba from HF
-    run_convert_pythia.sh           # Convert Pythia -> A2D-GPTNeoX
-    run_finetune_pythia.sh          # Finetune Pythia (AR)
-    run_finetune_mamba.sh           # Finetune Mamba (SSM)
-    run_finetune_bd3lm.sh           # Finetune Pythia-BD3LM
-    run_finetune_mdlm.sh           # Finetune Pythia-MDLM
-    eval_checkpoints.sh             # Evaluate one model type's checkpoints
-    finetune_pythia.py              # Pythia finetuning script
-    finetune_mamba.py               # Mamba finetuning script
-
-results/
-    finetune/                       # Finetuning outputs + checkpoints
-        pythia-2.8b-alpaca/
-        mamba-2.8b-alpaca/
-        pythia-2.8b-bd3lm-bs32-alpaca/
-        pythia-2.8b-mdlm-alpaca/
-    finetune_eval/                  # Evaluation results
-        pythia/<run_name>/checkpoint-*/results.json
-        mamba/<run_name>/checkpoint-*/results.json
-        bd3lm/<run_name>/checkpoint-*/results.json
-        mdlm/<run_name>/checkpoint-*/results.json
-
-analyze/
-    results_finetune.py             # Load results + plot generalization trends
-```
-
-## Extending to Other Datasets
-
-To finetune on a different dataset (e.g., EURUS for more reasoning data):
-
-```bash
-# AR models: pass --dataset
-torchrun --nproc_per_node=8 scripts/finetune/finetune_pythia.py \
-    --model_name_or_path EleutherAI/pythia-2.8b \
-    --dataset <hf_dataset_name> \
-    --output_dir results/finetune/pythia-2.8b-eurus
-
-# Diffusion models: pass --dataset_args
-accelerate launch --config_file dllm/scripts/accelerate_configs/zero2.yaml \
-    dllm/examples/a2d/bd3lm/sft.py \
-    --model_name_or_path dllm/.models/a2d/pythia-2.8b \
-    --dataset_args "<hf_dataset_name>" \
-    --output_dir results/finetune/pythia-2.8b-bd3lm-eurus
-```
-
-The dllm SFT scripts support multiple dataset formats via `load_sft_dataset`;
-see `dllm/dllm/data/utils.py` for supported formats.
+- task accuracy vs task accuracy,
+- task accuracy vs training step,
+- dense optimization curves within each model family.
