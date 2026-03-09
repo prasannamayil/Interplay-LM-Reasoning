@@ -8,9 +8,6 @@
 #   - bd3lm:   dllm/pipelines/a2d/eval.py with model=a2d_bd3lm
 #   - mdlm:    dllm/pipelines/a2d/eval.py with model=a2d_mdlm
 #
-# Benchmarks: hellaswag, arc_easy, arc_challenge, piqa, winogrande,
-#             openbookqa, mmlu, commonsense_qa
-#
 # Usage:
 #   bash scripts/finetune/eval_checkpoints.sh <model_type> <run_dir>
 #
@@ -19,18 +16,26 @@
 #
 # Environment:
 #   GPU_LIST       GPU IDs to use (default: 0,1,2,3,4,5,6,7)
-#   NUM_CKPTS      Max checkpoints to evaluate (default: 12)
+#   NUM_CKPTS      Max finetune checkpoints to evaluate (default: 12)
+#   TASK_GROUP     cloze | reasoning_gen | code_gen | all (default: cloze)
+#   INCLUDE_BASE   Include pretrained/base model as checkpoint-base (default: 0)
+#   BASE_MODEL     Optional override for the pretrained/base model path or HF id
 #   BLOCK_SIZE     BD3LM block size for eval (default: 32)
-#   MC_NUM         MC samples for diffusion loglikelihood (default: 128)
+#   MC_NUM         MC samples for diffusion loglikelihood (default: 32)
+#   LONG_STEPS     Diffusion denoising steps for long-form generation (default: 256)
+#   LONG_MAX_NEW_TOKENS  Generation length for long-form tasks (default: 256)
+#   AR_BATCH_SIZE  Batch size for AR evals (default: auto)
+#   DIFF_BATCH_SIZE Batch size for diffusion evals (default: 32)
 #
-# Examples:
-#   bash scripts/finetune/eval_checkpoints.sh pythia results/finetune/pythia-2.8b-alpaca
-#   bash scripts/finetune/eval_checkpoints.sh mamba results/finetune/mamba-2.8b-alpaca
-#   bash scripts/finetune/eval_checkpoints.sh bd3lm results/finetune/pythia-2.8b-bd3lm-bs32-alpaca
-#   bash scripts/finetune/eval_checkpoints.sh mdlm results/finetune/pythia-2.8b-mdlm-alpaca
+# Notes:
+#   - Cloze results are written directly under checkpoint directories to stay
+#     compatible with existing analysis code and artifacts.
+#   - Generative task groups are written under checkpoint directories as
+#     <group>/<task>/... so different few-shot settings can be rerun cleanly.
 # =============================================================================
 
 set -euo pipefail
+shopt -s nullglob globstar
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
@@ -42,144 +47,305 @@ if [[ ! "$RUN_DIR" = /* ]]; then
     RUN_DIR="$PROJECT_ROOT/$RUN_DIR"
 fi
 
+if [[ ! -d "$RUN_DIR" ]]; then
+    echo "Error: run_dir does not exist: $RUN_DIR"
+    exit 1
+fi
+
 RUN_NAME=$(basename "$RUN_DIR")
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
 IFS=',' read -ra GPU_ARRAY <<< "${GPU_LIST}"
 NGPUS="${#GPU_ARRAY[@]}"
 NUM_CKPTS="${NUM_CKPTS:-12}"
+TASK_GROUP="${TASK_GROUP:-cloze}"
+INCLUDE_BASE="${INCLUDE_BASE:-0}"
+BASE_MODEL="${BASE_MODEL:-}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
-MC_NUM="${MC_NUM:-128}"
+MC_NUM="${MC_NUM:-32}"
+LONG_STEPS="${LONG_STEPS:-256}"
+LONG_MAX_NEW_TOKENS="${LONG_MAX_NEW_TOKENS:-256}"
+AR_BATCH_SIZE="${AR_BATCH_SIZE:-auto}"
+DIFF_BATCH_SIZE="${DIFF_BATCH_SIZE:-32}"
 
-TASKS="hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,mmlu,commonsense_qa"
+CLOZE_TASKS_DEFAULT="hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,mmlu,commonsense_qa"
+CLOZE_TASKS="${TASKS:-${CLOZE_TASKS_DEFAULT}}"
 OUTPUT_BASE="${PROJECT_ROOT}/results/finetune_eval/${MODEL_TYPE}/${RUN_NAME}"
 
 export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH:-}"
 export HF_DATASETS_TRUST_REMOTE_CODE=True
+export HF_ALLOW_CODE_EVAL=1
+
+infer_model_size() {
+    if [[ "$RUN_NAME" =~ ([0-9]+([.][0-9]+)?b) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+}
+
+resolve_base_model() {
+    local size
+    size="$(infer_model_size)"
+    if [[ -n "$BASE_MODEL" ]]; then
+        echo "$BASE_MODEL"
+        return 0
+    fi
+
+    case "$MODEL_TYPE" in
+        pythia)
+            [[ -n "$size" ]] && echo "EleutherAI/pythia-${size}"
+            ;;
+        mamba)
+            [[ -n "$size" ]] && echo "state-spaces/mamba-${size}-hf"
+            ;;
+        bd3lm|mdlm)
+            [[ -n "$size" ]] && echo "${DLLM_ROOT}/.models/a2d/pythia-${size}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+has_eval_results() {
+    local out_dir="$1"
+    [[ -n "$(find "$out_dir" -type f \( -name "results.json" -o -name "results_*.json" \) -print -quit)" ]]
+}
+
+add_task_spec() {
+    TASK_SPECS+=("$1|$2|$3|$4|$5|$6")
+}
+
+declare -a TASK_SPECS=()
+
+case "$TASK_GROUP" in
+    cloze)
+        add_task_spec "cloze" "cloze" "$CLOZE_TASKS" "0" "short" "0"
+        ;;
+    reasoning_gen)
+        add_task_spec "reasoning_gen" "gsm8k_cot" "gsm8k_cot" "${GSM8K_FEWSHOT:-5}" "long" "0"
+        add_task_spec "reasoning_gen" "bbh" "bbh" "${BBH_FEWSHOT:-3}" "long" "0"
+        ;;
+    code_gen)
+        add_task_spec "code_gen" "humaneval_instruct" "humaneval_instruct" "0" "long" "1"
+        add_task_spec "code_gen" "mbpp_instruct" "mbpp_instruct" "0" "long" "1"
+        ;;
+    all)
+        add_task_spec "cloze" "cloze" "$CLOZE_TASKS" "0" "short" "0"
+        add_task_spec "reasoning_gen" "gsm8k_cot" "gsm8k_cot" "${GSM8K_FEWSHOT:-5}" "long" "0"
+        add_task_spec "reasoning_gen" "bbh" "bbh" "${BBH_FEWSHOT:-3}" "long" "0"
+        add_task_spec "code_gen" "humaneval_instruct" "humaneval_instruct" "0" "long" "1"
+        add_task_spec "code_gen" "mbpp_instruct" "mbpp_instruct" "0" "long" "1"
+        ;;
+    *)
+        echo "Error: Unknown TASK_GROUP '${TASK_GROUP}'"
+        exit 1
+        ;;
+esac
 
 echo "============================================================"
 echo "Finetune Eval | Run: ${RUN_NAME} | Type: ${MODEL_TYPE}"
 echo "Output: ${OUTPUT_BASE}"
-echo "GPUs: ${NGPUS} | Max checkpoints: ${NUM_CKPTS}"
+echo "GPUs: ${NGPUS} | Max finetune checkpoints: ${NUM_CKPTS}"
+echo "Task group: ${TASK_GROUP}"
+echo "Include base: ${INCLUDE_BASE}"
 echo "============================================================"
 
 # =============================================================================
-# Discover checkpoints (HF Trainer format: checkpoint-<number>)
+# Discover finetune checkpoints (HF Trainer format: checkpoint-<number>)
 # =============================================================================
-CHECKPOINTS=$(find "$RUN_DIR" -maxdepth 1 -type d -name "checkpoint-*" | sort -t- -k2n)
-TOTAL=$(echo "$CHECKPOINTS" | grep -c . || true)
+mapfile -t ALL_CHECKPOINTS < <(find "$RUN_DIR" -maxdepth 1 -type d -name "checkpoint-*" | sort -t- -k2n)
 
-if [[ "$TOTAL" -eq 0 ]] || [[ -z "$CHECKPOINTS" ]]; then
+if [[ "${#ALL_CHECKPOINTS[@]}" -eq 0 ]]; then
     echo "Error: No checkpoint-* directories found in $RUN_DIR"
     exit 1
 fi
 
-# Evenly space if too many
-if [[ "$TOTAL" -gt "$NUM_CKPTS" ]]; then
-    STEP=$(( (TOTAL - 1) / (NUM_CKPTS - 1) ))
-    SELECTED=""
-    IDX=0
-    while IFS= read -r ckpt; do
-        if (( IDX % STEP == 0 )) || (( IDX == TOTAL - 1 )); then
-            SELECTED="${SELECTED}${ckpt}"$'\n'
-        fi
-        IDX=$((IDX + 1))
-    done <<< "$CHECKPOINTS"
-    CHECKPOINTS="$SELECTED"
+declare -a NUMERIC_CHECKPOINTS=()
+FINAL_CHECKPOINT=""
+for ckpt in "${ALL_CHECKPOINTS[@]}"; do
+    ckpt_name="$(basename "$ckpt")"
+    if [[ "$ckpt_name" =~ ^checkpoint-[0-9]+$ ]]; then
+        NUMERIC_CHECKPOINTS+=("$ckpt")
+    elif [[ "$ckpt_name" == "checkpoint-final" ]]; then
+        FINAL_CHECKPOINT="$ckpt"
+    fi
+done
+
+declare -a SELECTED_CHECKPOINTS=()
+NUMERIC_TOTAL="${#NUMERIC_CHECKPOINTS[@]}"
+NUMERIC_BUDGET="$NUM_CKPTS"
+if [[ -n "$FINAL_CHECKPOINT" ]] && (( NUMERIC_BUDGET > 0 )); then
+    NUMERIC_BUDGET=$((NUMERIC_BUDGET - 1))
+fi
+if (( NUMERIC_BUDGET < 1 )) && (( NUMERIC_TOTAL > 0 )); then
+    NUMERIC_BUDGET=1
 fi
 
-echo "Checkpoints to evaluate:"
-echo "$CHECKPOINTS" | head -20
+if (( NUMERIC_TOTAL <= NUMERIC_BUDGET )); then
+    SELECTED_CHECKPOINTS=("${NUMERIC_CHECKPOINTS[@]}")
+elif (( NUMERIC_BUDGET == 1 )); then
+    SELECTED_CHECKPOINTS=("${NUMERIC_CHECKPOINTS[0]}")
+else
+    for ((idx = 0; idx < NUMERIC_BUDGET; idx++)); do
+        selected_idx=$(( idx * (NUMERIC_TOTAL - 1) / (NUMERIC_BUDGET - 1) ))
+        SELECTED_CHECKPOINTS+=("${NUMERIC_CHECKPOINTS[$selected_idx]}")
+    done
+fi
+
+if [[ -n "$FINAL_CHECKPOINT" ]]; then
+    SELECTED_CHECKPOINTS+=("$FINAL_CHECKPOINT")
+fi
+
+declare -a EVAL_ITEMS=()
+for ckpt in "${SELECTED_CHECKPOINTS[@]}"; do
+    EVAL_ITEMS+=("$(basename "$ckpt")|$ckpt")
+done
+
+if [[ "$INCLUDE_BASE" == "1" ]]; then
+    BASE_MODEL_RESOLVED="$(resolve_base_model || true)"
+    if [[ -z "$BASE_MODEL_RESOLVED" ]]; then
+        echo "[Warn] Could not infer base model for ${RUN_NAME}; skipping checkpoint-base"
+    elif [[ "$BASE_MODEL_RESOLVED" = /* || "$BASE_MODEL_RESOLVED" == ./* || "$BASE_MODEL_RESOLVED" == ../* ]] && [[ ! -e "$BASE_MODEL_RESOLVED" ]]; then
+        echo "[Warn] Base model path does not exist: ${BASE_MODEL_RESOLVED}; skipping checkpoint-base"
+    else
+        EVAL_ITEMS=("checkpoint-base|${BASE_MODEL_RESOLVED}" "${EVAL_ITEMS[@]}")
+    fi
+fi
+
+echo "Checkpoints/models to evaluate:"
+for item in "${EVAL_ITEMS[@]}"; do
+    IFS='|' read -r item_name item_path <<< "$item"
+    echo "  ${item_name} -> ${item_path}"
+done
 echo ""
 
-# =============================================================================
-# Evaluate each checkpoint
-# =============================================================================
-GPU_IDX=0
-PIDS=()
+launch_eval() {
+    local gpu="$1"
+    local model_path="$2"
+    local out_dir="$3"
+    local tasks="$4"
+    local fewshot="$5"
+    local profile="$6"
+    local unsafe="$7"
+    local group_name="$8"
+    local log_file="$out_dir/eval.log"
+    local block_arg
+    local diff_model
+    local model_args
+    local -a extra_args=()
 
-while IFS= read -r CKPT; do
-    [[ -z "$CKPT" ]] && continue
-
-    CKPT_NAME=$(basename "$CKPT")
-    OUT_DIR="${OUTPUT_BASE}/${CKPT_NAME}"
-    mkdir -p "$OUT_DIR"
-
-    if [[ -f "$OUT_DIR/results.json" ]]; then
-        echo "[Skip] ${CKPT_NAME} already evaluated"
-        continue
-    fi
-
-    GPU="${GPU_ARRAY[$GPU_IDX]}"
-    GPU_IDX=$(( (GPU_IDX + 1) % NGPUS ))
-
-    echo "[Eval] ${CKPT_NAME} on GPU ${GPU}"
+    mkdir -p "$out_dir"
 
     case "$MODEL_TYPE" in
-        pythia)
-            CUDA_VISIBLE_DEVICES=$GPU lm_eval \
+        pythia|mamba)
+            if [[ "$unsafe" == "1" ]]; then
+                extra_args+=(--confirm_run_unsafe_code)
+            fi
+            CUDA_VISIBLE_DEVICES="$gpu" lm_eval \
                 --model hf \
-                --model_args "pretrained=${CKPT}" \
-                --tasks "${TASKS}" \
-                --num_fewshot 0 \
-                --batch_size auto \
-                --output_path "$OUT_DIR" \
-                > "$OUT_DIR/eval.log" 2>&1 &
+                --model_args "pretrained=${model_path}" \
+                --tasks "${tasks}" \
+                --num_fewshot "${fewshot}" \
+                --batch_size "${AR_BATCH_SIZE}" \
+                --output_path "$out_dir" \
+                "${extra_args[@]}" \
+                > "$log_file" 2>&1 &
+            LAST_PID=$!
             ;;
-        mamba)
-            CUDA_VISIBLE_DEVICES=$GPU lm_eval \
-                --model hf \
-                --model_args "pretrained=${CKPT}" \
-                --tasks "${TASKS}" \
-                --num_fewshot 0 \
-                --batch_size auto \
-                --output_path "$OUT_DIR" \
-                > "$OUT_DIR/eval.log" 2>&1 &
-            ;;
-        mdlm)
-            cd "${DLLM_ROOT}"
-            CUDA_VISIBLE_DEVICES=$GPU accelerate launch --num_processes 1 \
-                dllm/pipelines/a2d/eval.py \
-                --model a2d_mdlm \
-                --tasks "${TASKS}" \
-                --num_fewshot 0 \
-                --model_args "pretrained=${CKPT},max_new_tokens=3,steps=3,block_size=256,cfg_scale=0.0,mc_num=${MC_NUM}" \
-                --output_path "$OUT_DIR" \
-                > "$OUT_DIR/eval.log" 2>&1 &
-            cd "${PROJECT_ROOT}"
-            ;;
-        bd3lm)
-            cd "${DLLM_ROOT}"
-            CUDA_VISIBLE_DEVICES=$GPU accelerate launch --num_processes 1 \
-                dllm/pipelines/a2d/eval.py \
-                --model a2d_bd3lm \
-                --tasks "${TASKS}" \
-                --num_fewshot 0 \
-                --model_args "pretrained=${CKPT},max_new_tokens=3,steps=3,block_size=${BLOCK_SIZE},cfg_scale=0.0,mc_num=${MC_NUM}" \
-                --output_path "$OUT_DIR" \
-                > "$OUT_DIR/eval.log" 2>&1 &
-            cd "${PROJECT_ROOT}"
+        mdlm|bd3lm)
+            if [[ "$MODEL_TYPE" == "mdlm" ]]; then
+                diff_model="a2d_mdlm"
+                block_arg="block_size=${MDLM_BLOCK_SIZE:-256}"
+            else
+                diff_model="a2d_bd3lm"
+                block_arg="block_size=${BLOCK_SIZE}"
+            fi
+
+            if [[ "$profile" == "short" ]]; then
+                model_args="pretrained=${model_path},max_new_tokens=3,steps=3,${block_arg},cfg_scale=0.0,mc_num=${MC_NUM}"
+            else
+                model_args="pretrained=${model_path},max_new_tokens=${LONG_MAX_NEW_TOKENS},steps=${LONG_STEPS},${block_arg},cfg_scale=0.0"
+            fi
+
+            if [[ "$group_name" != "cloze" ]]; then
+                extra_args+=(--apply_chat_template)
+            fi
+            if [[ "$unsafe" == "1" ]]; then
+                extra_args+=(--confirm_run_unsafe_code)
+            fi
+
+            (
+                cd "${DLLM_ROOT}"
+                CUDA_VISIBLE_DEVICES="$gpu" accelerate launch --num_processes 1 \
+                    dllm/pipelines/a2d/eval.py \
+                    --model "${diff_model}" \
+                    --tasks "${tasks}" \
+                    --num_fewshot "${fewshot}" \
+                    --batch_size "${DIFF_BATCH_SIZE}" \
+                    "${extra_args[@]}" \
+                    --model_args "${model_args}" \
+                    --output_path "$out_dir"
+            ) > "$log_file" 2>&1 &
+            LAST_PID=$!
             ;;
         *)
             echo "Error: Unknown model_type '${MODEL_TYPE}'"
             exit 1
             ;;
     esac
+}
 
-    PIDS+=($!)
+# =============================================================================
+# Evaluate each checkpoint/task spec
+# =============================================================================
+GPU_IDX=0
+PIDS=()
+JOB_NAMES=()
 
-    if [[ "${#PIDS[@]}" -ge "$NGPUS" ]]; then
-        echo "  Waiting for batch of ${#PIDS[@]} evals..."
-        for pid in "${PIDS[@]}"; do
-            wait "$pid" || echo "  Warning: PID $pid exited with error"
-        done
-        PIDS=()
-    fi
-done <<< "$CHECKPOINTS"
+for item in "${EVAL_ITEMS[@]}"; do
+    IFS='|' read -r item_name item_path <<< "$item"
+    ckpt_root="${OUTPUT_BASE}/${item_name}"
+
+    for spec in "${TASK_SPECS[@]}"; do
+        IFS='|' read -r group_name spec_name tasks fewshot profile unsafe <<< "$spec"
+
+        if [[ "$group_name" == "cloze" ]]; then
+            out_dir="$ckpt_root"
+        else
+            out_dir="$ckpt_root/$group_name/$spec_name"
+        fi
+
+        if has_eval_results "$out_dir"; then
+            echo "[Skip] ${item_name}/${group_name}/${spec_name} already evaluated"
+            continue
+        fi
+
+        gpu="${GPU_ARRAY[$GPU_IDX]}"
+        GPU_IDX=$(( (GPU_IDX + 1) % NGPUS ))
+
+        echo "[Eval] ${item_name}/${group_name}/${spec_name} on GPU ${gpu}"
+        launch_eval "$gpu" "$item_path" "$out_dir" "$tasks" "$fewshot" "$profile" "$unsafe" "$group_name"
+        PIDS+=("$LAST_PID")
+        JOB_NAMES+=("${item_name}/${group_name}/${spec_name}")
+
+        if [[ "${#PIDS[@]}" -ge "$NGPUS" ]]; then
+            echo "  Waiting for batch of ${#PIDS[@]} evals..."
+            for idx in "${!PIDS[@]}"; do
+                pid="${PIDS[$idx]}"
+                job_name="${JOB_NAMES[$idx]}"
+                wait "$pid" || echo "  Warning: ${job_name} exited with error"
+            done
+            PIDS=()
+            JOB_NAMES=()
+        fi
+    done
+done
 
 if [[ "${#PIDS[@]}" -gt 0 ]]; then
     echo "Waiting for final batch..."
-    for pid in "${PIDS[@]}"; do
-        wait "$pid" || echo "  Warning: PID $pid exited with error"
+    for idx in "${!PIDS[@]}"; do
+        pid="${PIDS[$idx]}"
+        job_name="${JOB_NAMES[$idx]}"
+        wait "$pid" || echo "  Warning: ${job_name} exited with error"
     done
 fi
 

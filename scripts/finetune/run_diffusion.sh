@@ -27,14 +27,33 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SIZE="${1:-2.8b}"
 BLOCK_SIZE="${2:-32}"
+DATASET_SPEC="${DATASET_SPEC:-tatsu-lab/alpaca}"
+DATASET_TAG="${DATASET_TAG:-alpaca}"
+EVAL_TASK_GROUPS="${EVAL_TASK_GROUPS:-cloze}"
+INCLUDE_BASE="${INCLUDE_BASE:-1}"
 
 echo "============================================================"
 echo "NODE 2: Diffusion Models -- Size: ${SIZE}"
 echo "  BD3LM (block_size=${BLOCK_SIZE}) + MDLM"
 echo "  Tokenizer: GPT-NeoX-20B"
-echo "  Dataset: tatsu-lab/alpaca"
+echo "  Dataset: ${DATASET_SPEC}"
 echo "============================================================"
 echo ""
+
+run_eval_groups() {
+    local model_type="$1"
+    local run_dir="$2"
+    local block_size_override="${3:-}"
+    IFS=',' read -ra GROUP_ARRAY <<< "${EVAL_TASK_GROUPS}"
+    for group_name in "${GROUP_ARRAY[@]}"; do
+        [[ -z "${group_name}" ]] && continue
+        echo "=== Evaluate ${model_type} checkpoints (${group_name}) ==="
+        TASK_GROUP="${group_name}" INCLUDE_BASE="${INCLUDE_BASE}" \
+            BLOCK_SIZE="${block_size_override:-${BLOCK_SIZE}}" \
+            bash "${SCRIPT_DIR}/eval_checkpoints.sh" "${model_type}" "${run_dir}"
+        echo ""
+    done
+}
 
 # --- Download ---
 echo "=== Download pretrained models ==="
@@ -47,61 +66,58 @@ bash "${SCRIPT_DIR}/run_convert_pythia.sh"
 echo ""
 
 # --- Train BD3LM (bs=32) ---
-BD3LM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-alpaca"
+BD3LM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-${DATASET_TAG}"
 if [[ -d "${BD3LM_DIR}/checkpoint-final" ]]; then
     echo "=== [Skip] BD3LM ${SIZE} (bs=${BLOCK_SIZE}) already trained ==="
 else
     echo "=== Finetune BD3LM ${SIZE} (block_size=${BLOCK_SIZE}) ==="
-    bash "${SCRIPT_DIR}/run_finetune_bd3lm.sh" "${SIZE}" "${BLOCK_SIZE}"
+    DATASET_SPEC="${DATASET_SPEC}" DATASET_TAG="${DATASET_TAG}" \
+        bash "${SCRIPT_DIR}/run_finetune_bd3lm.sh" "${SIZE}" "${BLOCK_SIZE}"
 fi
 echo ""
 
 # --- Train BD3LM (bs=1) ---
-BD3LM_BS1_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs1-alpaca"
+BD3LM_BS1_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs1-${DATASET_TAG}"
 if [[ -d "${BD3LM_BS1_DIR}/checkpoint-final" ]]; then
     echo "=== [Skip] BD3LM ${SIZE} (bs=1) already trained ==="
 else
     echo "=== Finetune BD3LM ${SIZE} (block_size=1) ==="
-    bash "${SCRIPT_DIR}/run_finetune_bd3lm.sh" "${SIZE}" "1"
+    DATASET_SPEC="${DATASET_SPEC}" DATASET_TAG="${DATASET_TAG}" \
+        bash "${SCRIPT_DIR}/run_finetune_bd3lm.sh" "${SIZE}" "1"
 fi
 echo ""
 
 # --- Train MDLM ---
-MDLM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-mdlm-alpaca"
+MDLM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-mdlm-${DATASET_TAG}"
 if [[ -d "${MDLM_DIR}/checkpoint-final" ]]; then
     echo "=== [Skip] MDLM ${SIZE} already trained ==="
 else
     echo "=== Finetune MDLM ${SIZE} ==="
-    bash "${SCRIPT_DIR}/run_finetune_mdlm.sh" "${SIZE}"
+    DATASET_SPEC="${DATASET_SPEC}" DATASET_TAG="${DATASET_TAG}" \
+        bash "${SCRIPT_DIR}/run_finetune_mdlm.sh" "${SIZE}"
 fi
 echo ""
 
 # --- Eval BD3LM (bs=32) ---
-BD3LM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-alpaca"
+BD3LM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-${DATASET_TAG}"
 if [[ -d "$BD3LM_DIR" ]]; then
-    echo "=== Evaluate BD3LM ${SIZE} (bs=${BLOCK_SIZE}) checkpoints ==="
-    BLOCK_SIZE="${BLOCK_SIZE}" bash "${SCRIPT_DIR}/eval_checkpoints.sh" bd3lm "$BD3LM_DIR"
-    echo ""
+    run_eval_groups "bd3lm" "$BD3LM_DIR" "${BLOCK_SIZE}"
 else
     echo "[Error] BD3LM output not found: $BD3LM_DIR"
 fi
 
 # --- Eval BD3LM (bs=1) ---
-BD3LM_BS1_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs1-alpaca"
+BD3LM_BS1_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-bd3lm-bs1-${DATASET_TAG}"
 if [[ -d "$BD3LM_BS1_DIR" ]]; then
-    echo "=== Evaluate BD3LM ${SIZE} (bs=1) checkpoints ==="
-    BLOCK_SIZE="1" bash "${SCRIPT_DIR}/eval_checkpoints.sh" bd3lm "$BD3LM_BS1_DIR"
-    echo ""
+    run_eval_groups "bd3lm" "$BD3LM_BS1_DIR" "1"
 else
     echo "[Error] BD3LM (bs=1) output not found: $BD3LM_BS1_DIR"
 fi
 
 # --- Eval MDLM ---
-MDLM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-mdlm-alpaca"
+MDLM_DIR="${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-mdlm-${DATASET_TAG}"
 if [[ -d "$MDLM_DIR" ]]; then
-    echo "=== Evaluate MDLM ${SIZE} checkpoints ==="
-    bash "${SCRIPT_DIR}/eval_checkpoints.sh" mdlm "$MDLM_DIR"
-    echo ""
+    run_eval_groups "mdlm" "$MDLM_DIR"
 else
     echo "[Error] MDLM output not found: $MDLM_DIR"
 fi
@@ -110,7 +126,7 @@ echo "============================================================"
 echo "NODE 2 COMPLETE: Diffusion models (BD3LM + MDLM) size=${SIZE}"
 echo ""
 echo "Results:"
-echo "  results/finetune_eval/bd3lm/pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-alpaca/"
-echo "  results/finetune_eval/bd3lm/pythia-${SIZE}-bd3lm-bs1-alpaca/"
-echo "  results/finetune_eval/mdlm/pythia-${SIZE}-mdlm-alpaca/"
+echo "  results/finetune_eval/bd3lm/pythia-${SIZE}-bd3lm-bs${BLOCK_SIZE}-${DATASET_TAG}/"
+echo "  results/finetune_eval/bd3lm/pythia-${SIZE}-bd3lm-bs1-${DATASET_TAG}/"
+echo "  results/finetune_eval/mdlm/pythia-${SIZE}-mdlm-${DATASET_TAG}/"
 echo "============================================================"
