@@ -20,12 +20,14 @@ def load_sft_dataset(
     """
     Examples of dataset_args:
       - "tatsu-lab/alpaca"
+      - "nvidia/OpenMathInstruct-2[train:10000,test:1000]"
       - "OpenCoder-LLM/opc-sft-stage2[name:educational_instruct,lang:python]"
       - "tatsu-lab/alpaca[train:5000]"
       - "tatsu-lab/alpaca[train:5000] + HuggingFaceH4/ultrachat_200k[train:5000]"
     """
     from dllm.data.alpaca import load_dataset_alpaca
     from dllm.data.opc import load_dataset_opc_sft
+    from dllm.data.reasoning import load_dataset_reasoning_sft
 
     specs = [p.strip() for p in re.split(r"[|+]", dataset_args) if p.strip()]
     all_parts = []
@@ -46,6 +48,10 @@ def load_sft_dataset(
         elif _match(dataset_name_or_path, "allenai/tulu-3-sft-mixture"):
             ds = load_dataset(dataset_name_or_path)
             ds = ds["train"].train_test_split(test_size=0.05, seed=42)
+        elif _match(dataset_name_or_path, "nvidia/OpenMathInstruct-2") or _match(
+            dataset_name_or_path, "notefill/gsm8k-instruction"
+        ):
+            ds = load_dataset_reasoning_sft(dataset_name_or_path)
         elif _match(dataset_name_or_path, "HuggingFaceTB/smoltalk"):
             name = kvs.pop("name", "all")
             ds = load_dataset(dataset_name_or_path, name=name)
