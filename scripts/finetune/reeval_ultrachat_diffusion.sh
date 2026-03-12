@@ -27,6 +27,7 @@ INCLUDE_BASE="${INCLUDE_BASE:-1}"
 MC_NUM="${MC_NUM:-32}"
 DIFF_BATCH_SIZE="${DIFF_BATCH_SIZE:-32}"
 TASKS="${TASKS:-hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,mmlu,commonsense_qa,lambada_openai}"
+LAUNCH_DELAY="${LAUNCH_DELAY:-15}"  # seconds between launches to avoid HF rate limits
 
 OUTPUT_ROOT="${PROJECT_ROOT}/results/finetune_eval_samples"
 
@@ -89,6 +90,7 @@ echo "Re-eval diffusion ultrachat models (with --log_samples)"
 echo "  Output root: ${OUTPUT_ROOT}"
 echo "  GPUs: ${NGPUS} | Checkpoints: ${NUM_CKPTS} | Base: ${INCLUDE_BASE}"
 echo "  MC_NUM: ${MC_NUM} | Tasks: ${TASKS}"
+echo "  Launch delay: ${LAUNCH_DELAY}s (set LAUNCH_DELAY=0 to disable)"
 echo "============================================================"
 
 GPU_IDX=0
@@ -146,6 +148,11 @@ for spec in "${RUN_SPECS[@]}"; do
         ) > "$log_file" 2>&1 &
         PIDS+=("$!")
         JOB_NAMES+=("${run_name}/${ckpt_name}")
+
+        # Stagger launches so dataset downloads don't all hit HF API at once
+        if (( LAUNCH_DELAY > 0 )) && (( ${#PIDS[@]} < NGPUS )); then
+            sleep "$LAUNCH_DELAY"
+        fi
 
         if (( ${#PIDS[@]} >= NGPUS )); then
             echo "  Waiting for batch of ${#PIDS[@]} evals..."
