@@ -150,7 +150,10 @@ for spec in "${RUN_SPECS[@]}"; do
         if (( ${#PIDS[@]} >= NGPUS )); then
             echo "  Waiting for batch of ${#PIDS[@]} evals..."
             for idx in "${!PIDS[@]}"; do
-                wait "${PIDS[$idx]}" || echo "  Warning: ${JOB_NAMES[$idx]} exited with error"
+                set +e; wait "${PIDS[$idx]}"; rc=$?; set -e
+                if (( rc != 0 )); then
+                    echo "  Warning: ${JOB_NAMES[$idx]} exited with code $rc (see eval.log)"
+                fi
             done
             PIDS=()
             JOB_NAMES=()
@@ -162,7 +165,10 @@ done
 if (( ${#PIDS[@]} > 0 )); then
     echo "Waiting for final batch..."
     for idx in "${!PIDS[@]}"; do
-        wait "${PIDS[$idx]}" || echo "  Warning: ${JOB_NAMES[$idx]} exited with error"
+        set +e; wait "${PIDS[$idx]}"; rc=$?; set -e
+        if (( rc != 0 )); then
+            echo "  Warning: ${JOB_NAMES[$idx]} exited with code $rc (see eval.log)"
+        fi
     done
 fi
 
