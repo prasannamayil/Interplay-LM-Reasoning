@@ -44,7 +44,15 @@ fi
 BATCH_SIZE="${BATCH_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 STEPS="${STEPS:-256}"
-TEMPERATURE="${TEMPERATURE:-0.0}"
+# Temperature: greedy (0.0) for pass@1, sampling (0.7) for pass@k (k>1).
+# Explicit TEMPERATURE env var always takes priority.
+if [ -z "${TEMPERATURE+x}" ]; then
+    if [ "${N_SAMPLES}" -gt 1 ] 2>/dev/null; then
+        TEMPERATURE="0.7"
+    else
+        TEMPERATURE="0.0"
+    fi
+fi
 BLOCK_SIZE_BD3LM="${BLOCK_SIZE_BD3LM:-16}"
 
 # =============================================================================

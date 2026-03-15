@@ -385,7 +385,7 @@ BLOCK_SIZE_BD3LM=16 bash dllm/examples/gsm_infinity/run_eval.sh \
 |----------|---------|-------------|
 | 4th arg / `N_SAMPLES` | 1 | k for pass@k (samples per prompt). Use 4th arg, e.g. `... output_dir 8` |
 | `STEPS` | 256 | Number of diffusion denoising steps |
-| `TEMPERATURE` | 0.0 | Sampling temp (0.0 for pass@1; use 0.7 for pass@128) |
+| `TEMPERATURE` | auto: 0.0 if k=1, **0.7** if k>1 | Sampling temp. Auto-set based on k; explicit `TEMPERATURE` env var overrides |
 | `BLOCK_SIZE_BD3LM` | 16 | BD3LM eval block size (**must match training block_size!**) |
 | `BATCH_SIZE` | 16 | Micro-batch size |
 | `MAX_NEW_TOKENS` | 1024 | Max generation length |
