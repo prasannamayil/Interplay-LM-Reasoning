@@ -15,6 +15,7 @@ Covers data, hyperparameters, run scripts, and evaluation settings for every mod
    - [Mamba-2 (SSM, lingua)](#15-mamba-2-ssm-lingua)
    - [MTP Transformer (Multi-Token Prediction, lingua)](#16-mtp-transformer-multi-token-prediction-lingua)
    - [Shared Hyperparameters Summary](#17-shared-hyperparameters-summary-pretraining)
+   - [Scaling Beyond 10B (30B and 60B)](#18-scaling-beyond-10b-tokens-30b-and-60b)
 2. [GSM-Infinity Evaluation (Pretraining)](#2-gsm-infinity-evaluation-pretraining)
    - [Eval Script & Scoring](#21-eval-script--scoring)
    - [Pass@k Settings per Model](#22-passk-settings-per-model)
@@ -219,6 +220,59 @@ All models match on these key settings to ensure fair comparison:
 | Total tokens | 10B (1 epoch) | |
 | Steps | ~10,000 | Extended to 20K–50K for BD3LM experiments |
 | GPUs | 8× H100 | |
+
+---
+
+### 1.8 Scaling Beyond 10B Tokens (30B and 60B)
+
+The raw data has 60 shard files named `_1B.jsonl`, but the filenames overstate
+real token counts. After tokenization + packing into 2048-length chunks:
+
+| Op | Shards | Raw tokens | Fraction |
+|----|--------|-----------|----------|
+| 2 | 8 | 8.7B | 15.1% |
+| 3 | **3** | **2.7B** | **4.7%** |
+| 4 | 6 | 5.4B | 9.4% |
+| 5 | 7 | 6.6B | 11.4% |
+| 6 | 7 | 7.5B | 13.0% |
+| 7 | 6 | 5.9B | 10.2% |
+| 8 | 7 | 6.9B | 12.0% |
+| 9 | 8 | 7.5B | 13.0% |
+| 10 | 8 | 6.5B | 11.3% |
+
+**Verified dataset sizes:**
+
+| Requested | Actual packed tokens | Steps | Distribution | Time (400M, 8× H100) |
+|-----------|---------------------|-------|--------------|-----------------------|
+| 10B | 9.5B | ~10K | Uniform | ~8h |
+| **30B** | **27.4B** | **~27K** | **Uniform** | **~22h** |
+| **60B** | **46.9B** | **~46K** | **Natural (non-uniform)** | **~37h** |
+
+op3 is heavily underrepresented (4.7%). 30B gives uniform sampling; 60B uses all
+data with its natural lopsided distribution (op2 gets 3.2× more data than op3).
+
+**dLLM (MDLM/BD3LM):**
+
+```bash
+# Precache (CPU node)
+TOKEN_BUDGET=30B bash dllm/examples/gsm_infinity/run_pretrain_400M.sh precache
+TOKEN_BUDGET=60B bash dllm/examples/gsm_infinity/run_pretrain_400M.sh precache
+
+# Train (use actual step counts, not budget labels)
+TOKEN_BUDGET=30B BLOCK_SIZE=16 bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm --max_steps 27000
+TOKEN_BUDGET=60B BLOCK_SIZE=16 bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm --max_steps 46000
+```
+
+**AR Transformer:**
+
+```bash
+bash scripts/run_pretrain_400M_ar_30B.sh   # 30B uniform (~27K steps)
+bash scripts/run_pretrain_400M_ar_60B.sh   # 60B natural (~46K steps)
+```
+
+**Key files:** `scripts/run_pretrain_400M_ar_{30B,60B}.sh`,
+`LLaMA-Factory/examples/gsm_infinity/pt_400M_{30B,60B}.yaml`,
+`data/PRESET.json` (`composition-30B` and `composition-60B` entries).
 
 ---
 

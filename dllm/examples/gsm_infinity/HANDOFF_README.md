@@ -163,12 +163,20 @@ Instead, symlink:
 ```bash
 cd $YOUR_ROOT
 
-# Symlink the pre-tokenized training data
+# Symlink the pre-tokenized training data (10B default + 30B/60B if available)
 ln -s $SHARED_ROOT/data/composition_hf_dllm_10B data/composition_hf_dllm_10B
+ln -s $SHARED_ROOT/data/composition_hf_dllm_30B data/composition_hf_dllm_30B 2>/dev/null || true
+ln -s $SHARED_ROOT/data/composition_hf_dllm_60B data/composition_hf_dllm_60B 2>/dev/null || true
+
+# Symlink raw data (needed for AR training and for precache if you want to regenerate)
+mkdir -p data/composition_hf
+ln -s $SHARED_ROOT/data/composition_hf/train data/composition_hf/train
 
 # Symlink the test data
-mkdir -p data/composition_hf
 ln -s $SHARED_ROOT/data/composition_hf/test_small data/composition_hf/test_small
+
+# Symlink PRESET.json (needed for AR LLaMA-Factory configs)
+ln -s $SHARED_ROOT/data/PRESET.json data/PRESET.json 2>/dev/null || true
 
 # Symlink model configs (tokenizer + architecture)
 ln -s $SHARED_ROOT/dllm/model_configs/a2d_qwen2_400M dllm/model_configs/a2d_qwen2_400M
@@ -521,8 +529,162 @@ already be world-readable (`chmod -R o+rX` was applied).
 
 ---
 
-## 10. Further Documentation
+## 10. Scaling Beyond 10B Tokens (30B and 60B)
+
+The default pipeline trains on 10B tokens (~10K steps). The HF dataset contains
+exactly **60B tokens** on disk (60 shards × 1B each). No additional download is
+needed — all the data is already at `data/composition_hf/train/`.
+
+### Available data and actual token counts
+
+The raw data has 60 shard files named `_1B.jsonl`, but the filenames overstate
+the real token counts. After tokenization + packing into 2048-length chunks
+(the `precache_data.py` step), the actual token counts are:
+
+| Op | Shards | Raw tokens (est.) | Fraction |
+|----|--------|-------------------|----------|
+| 2 | 8 | 8.7B | 15.1% |
+| 3 | **3** | **2.7B** | **4.7%** |
+| 4 | 6 | 5.4B | 9.4% |
+| 5 | 7 | 6.6B | 11.4% |
+| 6 | 7 | 7.5B | 13.0% |
+| 7 | 6 | 5.9B | 10.2% |
+| 8 | 7 | 6.9B | 12.0% |
+| 9 | 8 | 7.5B | 13.0% |
+| 10 | 8 | 6.5B | 11.3% |
+| **Total** | **60** | **~57.7B raw** | **→ ~47B packed** |
+
+**Verified dataset sizes after `precache_data.py`:**
+
+| Requested budget | Actual packed tokens | Steps (~1M tok/step) |
+|-----------------|---------------------|---------------------|
+| `10B` | **9.5B** | ~9,300 |
+| `30B` | **27.4B** | ~13,360K chunks → **~27K steps** |
+| `60B` (all data) | **46.9B** | ~22,909K chunks → **~46K steps** |
+
+The shortfall comes from: (1) shard filenames overcount real tokens, and
+(2) packing examples into fixed 2048-token chunks drops short tails.
+
+**Key observation:** op3 (simplest non-trivial) is heavily underrepresented
+at 4.7%, while op2 (easiest) gets 15.1% and op6/9 get 13%. The distribution
+is lopsided — more data at the extremes, much less for op3.
+
+This means:
+- **30B (uniform):** Each op gets ~3B tokens. op3 is nearly fully used (2.7B
+  available); other ops are subsampled to match. Clean balanced comparison.
+- **All data (47B actual):** Non-uniform exposure — op2 gets 3.2× more data
+  than op3. The model overtrain on easy/hard extremes and undertrain on
+  simple-but-not-trivial reasoning.
+
+### Two scaling options
+
+| Budget | Actual tokens | Steps | Distribution | Time (400M, 8× H100) |
+|--------|--------------|-------|--------------|-----------------------|
+| 10B | 9.5B | ~10K | Uniform | ~8h |
+| **30B** | **27.4B** | **~27K** | **Uniform** | **~22h** |
+| **60B** | **46.9B** | **~46K** | **Natural (non-uniform)** | **~37h** |
+
+### Precache tokenized data for dLLM (CPU node, 64 cores)
+
+The existing `precache_data.py` is invoked automatically by the pretrain scripts,
+but you can pre-run it on a CPU node for faster startup:
+
+```bash
+cd $YOUR_ROOT/dllm
+
+# 30B (uniform sampling)
+python examples/gsm_infinity/precache_data.py \
+    --raw_data_dir $YOUR_ROOT/data/composition_hf/train \
+    --tokenizer_path model_configs/a2d_qwen2_400M \
+    --output_dir $YOUR_ROOT/data/composition_hf_dllm_30B \
+    --token_budget 30B --op_min 2 --op_max 10 --seq_length 2048 --num_proc 64
+
+# 60B (uses all data)
+python examples/gsm_infinity/precache_data.py \
+    --raw_data_dir $YOUR_ROOT/data/composition_hf/train \
+    --tokenizer_path model_configs/a2d_qwen2_400M \
+    --output_dir $YOUR_ROOT/data/composition_hf_dllm_60B \
+    --token_budget 60B --op_min 2 --op_max 10 --seq_length 2048 --num_proc 64
+```
+
+### Train dLLM models (30B or 60B)
+
+Set `TOKEN_BUDGET` and `--max_steps` (use actual token counts, not the budget label):
+
+```bash
+# BD3LM 400M — 30B budget (actual ~27.4B → ~27K steps)
+TOKEN_BUDGET=30B BLOCK_SIZE=16 \
+    bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm --max_steps 27000
+
+# BD3LM 400M — 60B budget = all data (actual ~46.9B → ~46K steps)
+TOKEN_BUDGET=60B BLOCK_SIZE=16 \
+    bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm --max_steps 46000
+
+# MDLM 400M — 30B budget
+TOKEN_BUDGET=30B \
+    bash dllm/examples/gsm_infinity/run_pretrain_400M.sh mdlm --max_steps 27000
+
+# MDLM 400M — 60B budget = all data
+TOKEN_BUDGET=60B \
+    bash dllm/examples/gsm_infinity/run_pretrain_400M.sh mdlm --max_steps 46000
+```
+
+### Training for more than 1 epoch (more tokens seen)
+
+You can train for **multiple epochs** over the same data by increasing
+`--max_steps` beyond the 1-epoch count. The data loops automatically.
+
+```bash
+# 2 epochs over 30B data (~27K * 2 = 54K steps, ~55B tokens seen)
+TOKEN_BUDGET=30B BLOCK_SIZE=16 \
+    bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm --max_steps 54000
+
+# 3 epochs over 30B data (~27K * 3 = 81K steps, ~82B tokens seen)
+TOKEN_BUDGET=30B BLOCK_SIZE=16 \
+    bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm --max_steps 81000
+
+# 2 epochs over 60B data (~46K * 2 = 92K steps, ~94B tokens seen)
+TOKEN_BUDGET=60B BLOCK_SIZE=16 \
+    bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm --max_steps 92000
+```
+
+The cosine LR schedule adapts to whatever `--max_steps` you set. The data
+distribution does NOT change across epochs — multi-epoch just means repeated
+passes.
+
+| Dataset | 1 epoch steps | Tokens seen | 2 epochs | 3 epochs |
+|---------|--------------|-------------|----------|----------|
+| 10B | ~10K | 9.5B | ~20K / 19B | ~30K / 29B |
+| 30B | ~27K | 27.4B | ~54K / 55B | ~81K / 82B |
+| 60B | ~46K | 46.9B | ~92K / 94B | ~138K / 141B |
+
+### Train AR (Transformer) on 30B or 60B
+
+Dedicated configs and run scripts are provided:
+
+```bash
+# AR 400M — 30B tokens (uniform)
+bash scripts/run_pretrain_400M_ar_30B.sh
+
+# AR 400M — 60B tokens (natural distribution)
+bash scripts/run_pretrain_400M_ar_60B.sh
+```
+
+### Key files
+
+| File | Purpose |
+|------|---------|
+| `scripts/run_pretrain_400M_ar_30B.sh` | AR 400M on 30B (uniform) |
+| `scripts/run_pretrain_400M_ar_60B.sh` | AR 400M on 60B (natural) |
+| `LLaMA-Factory/examples/gsm_infinity/pt_400M_30B.yaml` | AR 30B config |
+| `LLaMA-Factory/examples/gsm_infinity/pt_400M_60B.yaml` | AR 60B config |
+| `data/PRESET.json` | `composition-30B` and `composition-60B` presets |
+
+---
+
+## 11. Further Documentation
 
 - **Diffusion LM training details**: `dllm/examples/gsm_infinity/README.md`
 - **RL finetuning (not needed now)**: `scripts/gsm_infinity_rl/README.md`
 - **Analysis code**: `analyze/process_eval_results.py` (well-documented module)
+- **Training & eval reference**: `TRAINING_AND_EVAL_REFERENCE.md` (comprehensive hyperparameter reference)
