@@ -159,14 +159,15 @@ train_mdlm() {
 # flex_attention exploits block-sparse mask for faster attention
 # =============================================================================
 train_bd3lm() {
+    local BS="${BLOCK_SIZE:-16}"
     echo "=============================================="
     echo "Training A2D-BD3LM 200M on GSM-Infinity"
     echo "  hidden=768, layers=24, FFN=3072  →  ~205M params"
-    echo "  batch=16/GPU, accum=4, block_size=32, grad_ckpt=True"
+    echo "  block_size=${BS}, grad_ckpt=True"
     echo "=============================================="
     echo "GPUs: ${NPROC}, Accel config: ${ACCEL_CONFIG}"
 
-    RUN_NAME="a2d_bd3lm_200M_$(date +%Y%m%d_%H%M%S)"
+    RUN_NAME="a2d_bd3lm_200M_bs${BS}_$(date +%Y%m%d_%H%M%S)"
     OUTPUT_DIR="${DLLM_ROOT}/saves/gsm_infinity/${RUN_NAME}"
 
     accelerate launch \
@@ -186,7 +187,7 @@ train_bd3lm() {
         --max_grad_norm 1.0 \
         --per_device_train_batch_size 64 \
         --gradient_accumulation_steps 1 \
-        --block_size 128 \
+        --block_size "${BS}" \
         --attn_implementation flex_attention \
         --bf16 True \
         --gradient_checkpointing True \
@@ -245,7 +246,14 @@ case "${COMMAND}" in
         echo "Environment variables:"
         echo "  GPU_LIST       GPU IDs (default: 0,1,2,3,4,5,6,7)"
         echo "  ACCEL_CONFIG   Accelerate config name (default: zero2)"
+        echo "  BLOCK_SIZE     BD3LM block size (default: 16; try 8, 16, 32)"
         echo "  TOKEN_BUDGET   Token budget (default: 10B)"
         echo "  WANDB_PROJECT  Wandb project name (default: dllm-gsm-infinity)"
+        echo ""
+        echo "Examples:"
+        echo "  BLOCK_SIZE=8  bash $0 bd3lm"
+        echo "  BLOCK_SIZE=16 bash $0 bd3lm"
+        echo "  BLOCK_SIZE=32 bash $0 bd3lm"
+        echo "  BLOCK_SIZE=32 bash $0 bd3lm --max_steps 20000  # train longer"
         ;;
 esac

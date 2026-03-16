@@ -1,0 +1,32 @@
+RUN_NAME:
+  - /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/saves/gsm_infinity/a2d_bd3lm_400M_20260223_203350
+  
+CHECKPOINT_TO_RUN: [ "1000", "2000", "3000", "4000", "5000","6000","7000","8000","9000", "10000", "final"]
+OUTPUT_PATH: "/fast/bthambiraja/projects/Interplay-LM-Reasoning/results/bd3lm_eval_prasanna"
+
+CONDOR_JOB_CONFIG:
+  # Resource requests
+  N_RAM: 128G
+  N_CPUS: 64
+  N_DISK: 128G
+  # GPU: 1x H100 80GB for debug run
+  N_GPUS: 1
+  MIN_GPU_MEM: 42000
+  MAX_GPU_MEM: 84000
+  # Log output path (logs_condor/ and condor_job_files/ must exist here)
+  # CONDOR_LOG_PATH: /home/bthambiraja/projects/Interplay-LM-Reasoning
+  CONDOR_LOG_PATH: /fast/bthambiraja/projects/LLMInterplay
+
+  # args are joined into the bash command passed to condor.
+  # train.sh sets up env (LLMI_setup), exports any leading KEY=VALUE tokens,
+  # then runs the remaining command via "${cmd_vrgs[@]}".
+  ALL_MODELS_ARGS_TO_TEST:
+   # Transfomer confif
+    - args:
+      - /home/bthambiraja/projects/Interplay-LM-Reasoning/_condor/scripts/env_setup_and_start.sh
+      - BLOCK_SIZE_BD3LM=32
+      - /bin/bash
+      - dllm/examples/gsm_infinity/run_eval.sh
+      - <model1>/<checkpoint>
+      - bd3lm
+      - <OUTPUT_PATH> + "/" + <model1>.split("/")[-1] + "/" + <checkpoint_to_run>

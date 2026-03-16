@@ -31,6 +31,9 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 cd "${PROJECT_ROOT}"
 
+echo "[INFO] Running: Nvidia-smi"
+nvidia-smi
+
 # ---------------------------------------------------------------------------
 # Run the command with all remaining args.
 # Any leading KEY=VALUE tokens are exported as env vars before running.

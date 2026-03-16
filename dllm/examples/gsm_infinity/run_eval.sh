@@ -45,6 +45,7 @@ BATCH_SIZE="${BATCH_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 STEPS="${STEPS:-256}"
 TEMPERATURE="${TEMPERATURE:-0.0}"
+BLOCK_SIZE_BD3LM_FROM_ENV="${BLOCK_SIZE_BD3LM+set}"
 BLOCK_SIZE_BD3LM="${BLOCK_SIZE_BD3LM:-16}"
 
 # =============================================================================
@@ -69,12 +70,29 @@ echo "Samples/prompt:  ${N_SAMPLES}"
 echo "Batch size:      ${BATCH_SIZE}"
 echo "Temperature:     ${TEMPERATURE}"
 echo "Steps:           ${STEPS}"
-echo "BD3LM block_size: ${BLOCK_SIZE_BD3LM}"
+if [ "${BLOCK_SIZE_BD3LM_FROM_ENV}" = "set" ]; then
+    echo "BD3LM block_size: ${BLOCK_SIZE_BD3LM}  [set via env]"
+else
+    echo "BD3LM block_size: ${BLOCK_SIZE_BD3LM}  [default]"
+fi
 echo "=============================================="
 
 source "${VENV}"
 export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
 cd "${DLLM_ROOT}"
+
+# --- GPU sanity check ---
+python - <<'EOF'
+import torch, sys
+if not torch.cuda.is_available():
+    print("ERROR: torch.cuda.is_available() = False — no GPU detected!", file=sys.stderr)
+    sys.exit(1)
+n = torch.cuda.device_count()
+for i in range(n):
+    props = torch.cuda.get_device_properties(i)
+    print(f"[GPU {i}] {props.name}  {props.total_memory // 1024**3} GB")
+print(f"Using {n} GPU(s). CUDA_VISIBLE_DEVICES={__import__('os').environ.get('CUDA_VISIBLE_DEVICES','(not set)')}")
+EOF
 
 # Trim leading/trailing whitespace (guards against accidental trailing space after \ in caller)
 MODEL_PATH="${MODEL_PATH#"${MODEL_PATH%%[![:space:]]*}"}"

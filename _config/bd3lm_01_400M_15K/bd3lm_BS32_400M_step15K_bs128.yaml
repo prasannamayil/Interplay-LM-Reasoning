@@ -1,0 +1,30 @@
+CONDOR_JOB_CONFIG:
+  # Resource requests
+  N_RAM: 500G
+  N_CPUS: 64
+  N_DISK: 1000G
+
+  # GPU: 1x H100 80GB for debug run
+  N_GPUS: 8
+  MIN_GPU_MEM: 42000
+  MAX_GPU_MEM: 84000
+
+  # Log output path (logs_condor/ and condor_job_files/ must exist here)
+  # CONDOR_LOG_PATH: /home/bthambiraja/projects/Interplay-LM-Reasoning
+  CONDOR_LOG_PATH: /fast/bthambiraja/projects/LLMInterplay
+  
+  # args are joined into the bash command passed to condor.
+  # train.sh sets up env (LLMI_setup), exports any leading KEY=VALUE tokens,
+  # then runs the remaining command via "${cmd_args[@]}".
+  args:
+    - /home/bthambiraja/projects/Interplay-LM-Reasoning/_condor/scripts/env_setup_and_start.sh
+    - BLOCK_SIZE=32
+    - /bin/bash
+    - dllm/examples/gsm_infinity/run_pretrain_400M.sh
+    - bd3lm
+    - --max_steps
+    - "15000"
+    - --per_device_train_batch_size
+    - "128"
+    - --save_steps
+    - "1500"

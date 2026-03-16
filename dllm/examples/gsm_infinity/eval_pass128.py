@@ -64,10 +64,18 @@ from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
 from dllm.core.samplers.bd3lm import BD3LMSampler, BD3LMSamplerConfig
 
 # Optional: process (dependency-graph) scoring. Requires repo root on PYTHONPATH.
+# Import reward_fn directly (bypasses verl/__init__.py which requires `ray`).
+_parse_graph_import_error: str | None = None
 try:
-    from verl.reward_fn import parse_graph
-except ImportError:
+    import importlib.util, pathlib
+    _reward_fn_path = pathlib.Path(__file__).resolve().parents[3] / "verl" / "reward_fn.py"
+    _spec = importlib.util.spec_from_file_location("_reward_fn", _reward_fn_path)
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    parse_graph = _mod.parse_graph
+except Exception as e:
     parse_graph = None
+    _parse_graph_import_error = str(e)
 
 
 # ============================================================================
@@ -239,14 +247,15 @@ def evaluate(
     block_size_bd3lm: int = 16,
     temperature: float = 0.0,
     op_levels: list[int] | None = None,
-    device: str = "cuda",
 ):
     os.makedirs(output_dir, exist_ok=True)
 
     is_ar = sampler_type == "ar"
 
     # --- Load model and tokenizer ---
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading model from {model_path}")
+    print(f"Device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else " (no GPU found)"))
     if is_ar:
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         if tokenizer.pad_token is None:
@@ -254,9 +263,11 @@ def evaluate(
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map=None,
+            device_map="auto" if device == "cuda" else None,
         )
-        model = model.to(device).eval()
+        if device != "cuda":
+            model = model.to(device)
+        model = model.eval()
         sampler = None
         sampler_config = None
     else:
@@ -293,7 +304,13 @@ def evaluate(
         print(f"Temperature: {temperature}, Max new tokens: {max_new_tokens}")
     print(f"Scoring: process+outcome (both required; extra steps not penalized)")
     if parse_graph is None:
-        print("WARNING: verl.reward_fn.parse_graph not available; using outcome-only scoring.")
+        print("=" * 60)
+        print("WARNING: process scoring unavailable — falling back to OUTCOME-ONLY scoring.")
+        print(f"  Tried: {_reward_fn_path}")
+        if _parse_graph_import_error:
+            print(f"  Error: {_parse_graph_import_error}")
+        print("  Metrics from this run are NOT comparable to runs with process+outcome scoring.")
+        print("=" * 60)
 
     # --- Load test data ---
     print(f"\nLoading test data from {test_dir}")
@@ -341,7 +358,8 @@ def evaluate(
                         truncation=True,
                         max_length=min(getattr(tokenizer, "model_max_length", 2048), 2048),
                     )
-                    enc = {k: v.to(device) for k, v in enc.items()}
+                    enc = {k: v.to(device) for k, v in enc.items()
+                           if k != "token_type_ids"}
                     gen_kwargs = dict(
                         **enc,
                         max_new_tokens=max_new_tokens,
@@ -503,11 +521,6 @@ def main():
         "--op_levels", type=str, default=None,
         help="Comma-separated op levels to evaluate (default: all in test_dir)",
     )
-    parser.add_argument(
-        "--device", type=str, default="cuda",
-        help="Device to use (default: cuda)",
-    )
-
     args = parser.parse_args()
 
     op_levels = None
@@ -527,7 +540,6 @@ def main():
         block_size_bd3lm=args.block_size_bd3lm,
         temperature=args.temperature,
         op_levels=op_levels,
-        device=args.device,
     )
 
 

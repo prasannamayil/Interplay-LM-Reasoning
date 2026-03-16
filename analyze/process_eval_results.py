@@ -36,7 +36,7 @@ from scipy.special import ndtr as _probit_cdf
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_ROOT = PROJECT_ROOT / "results"
+RESULTS_ROOT = Path("/fast/bthambiraja/projects/Interplay-LM-Reasoning/results")
 
 PASS_K_VALUES: list[int] = [1, 2, 4, 8, 16, 32, 64, 128]
 
@@ -60,15 +60,22 @@ DEFAULT_OOD_GROUPS: dict[str, list[int]] = {
 #   run_pretrain_400M.sh -> block_size 128  (second 400M)
 _BD3LM_BLOCK_SIZE_HINTS: dict[str, int] = {
     # 100M: only one run, block_size=32
-    "a2d_bd3lm_100M_20260221_145059": 32,
+    # "a2d_bd3lm_100M_20260221_145059": 32,
     # 200M: two runs
-    "a2d_bd3lm_200M_20260223_120716": 32,
-    "a2d_bd3lm_200M_20260223_221022": 128,
+    # "a2d_bd3lm_200M_20260223_120716": 32,
+    # "a2d_bd3lm_200M_20260223_221022": 128,
     # 400M: four runs
-    "a2d_bd3lm_400M_20260223_203350": 32,
+    # "a2d_bd3lm_400M_20260223_203350": 32,
     #"a2d_bd3lm_400M_20260224_062453": 128,
-    "a2d_bd3lm_400M_20260227_001819": 8,
-    "a2d_bd3lm_400M_20260227_084524": 16,
+    # "a2d_bd3lm_400M_20260227_001819": 8,
+    # "a2d_bd3lm_400M_20260227_084524": 16,
+    # "a2d_bd3lm_400M_bs8_20260309_202900": 8,
+    # "a2d_bd3lm_400M_bs16_20260309_202900": 16,
+    # "a2d_bd3lm_400M_bs32_20260309_202900": 32,
+    ##
+    "a2d_bd3lm_200M_bs8_20260313_181251": 8,
+    "a2d_bd3lm_200M_bs16_20260313_175846": 16,
+    "a2d_bd3lm_200M_bs32_20260313_175846": 32,
 }
 
 
@@ -135,17 +142,18 @@ def discover_runs(
                 meta = _parse_transformer_meta(p.name)
                 runs.append(meta)
                 if verbose:
-                    print(f"[discover] transformer  {p.name}  size={meta.size}")
+                    print(f"[discover] transformer  {p.name}  size={meta.size}  path={p}")
 
-    d_dir = root / "dllm_eval"
-    if d_dir.exists():
-        for p in sorted(d_dir.iterdir()):
-            if p.is_dir():
-                meta = _parse_dllm_meta(p.name)
-                runs.append(meta)
-                if verbose:
-                    bs_str = f"  bs={meta.block_size}" if meta.block_size else ""
-                    print(f"[discover] {meta.model_type:<12s} {p.name}  size={meta.size}{bs_str}")
+    for extra_dir in ["dllm_eval", "bd3lm_eval"]:
+        d_dir = root / extra_dir
+        if d_dir.exists():
+            for p in sorted(d_dir.iterdir()):
+                if p.is_dir():
+                    meta = _parse_dllm_meta(p.name)
+                    runs.append(meta)
+                    if verbose:
+                        bs_str = f"  bs={meta.block_size}" if meta.block_size else ""
+                        print(f"[discover] {meta.model_type:<12s} {p.name}  size={meta.size}{bs_str}  path={p}")
 
     return runs
 
@@ -195,16 +203,27 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _load_metrics_jsonl(path: Path) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if isinstance(obj, dict) and isinstance(obj.get("metrics"), dict):
-                metrics.update(obj["metrics"])
-            elif isinstance(obj, dict):
-                metrics.update(obj)
+    raw = path.read_text(encoding="utf-8")
+    # Try whole-file JSON first (handles pretty-printed single-object files)
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and isinstance(obj.get("metrics"), dict):
+            metrics.update(obj["metrics"])
+        elif isinstance(obj, dict):
+            metrics.update(obj)
+        return metrics
+    except json.JSONDecodeError:
+        pass
+    # Fall back to line-by-line JSONL
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        if isinstance(obj, dict) and isinstance(obj.get("metrics"), dict):
+            metrics.update(obj["metrics"])
+        elif isinstance(obj, dict):
+            metrics.update(obj)
     return metrics
 
 
@@ -291,7 +310,14 @@ def load_all(
     multiplier = 100.0 if to_percent else 1.0
 
     for meta in runs:
-        base = RESULTS_ROOT / ("transformer_eval" if meta.eval_type == "transformer" else "dllm_eval") / meta.run_name
+        if meta.eval_type == "transformer":
+            base = RESULTS_ROOT / "transformer_eval" / meta.run_name
+        else:
+            # Check both dllm_eval and bd3lm_eval; prefer whichever exists
+            base = RESULTS_ROOT / "dllm_eval" / meta.run_name
+            alt = RESULTS_ROOT / "bd3lm_eval" / meta.run_name
+            if not base.exists() and alt.exists():
+                base = alt
         ckpt_dirs = _iter_checkpoint_dirs(base)
         ckpt_dirs = subsample_checkpoints(ckpt_dirs, max_ckpts)
 
