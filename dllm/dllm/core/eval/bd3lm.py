@@ -1,14 +1,21 @@
 """
-BD3LM eval harness with loglikelihood (Monte Carlo ELBO) and generate_until.
+BD3LM eval harness with loglikelihood and generate_until.
 
-Loglikelihood uses the same importance-weighted MC estimator as MDLM, but
-constructs the BD3LM-style input: ``x_t || x_0`` with block-diagonal attention.
+Supports two likelihood estimators (controlled by ``ll_method`` kwarg):
+
+- **elbo** (default): Monte Carlo ELBO — random masking + importance weighting,
+  averaged over ``mc_num`` samples.
+- **duel**: Exact likelihood via deterministic unmasking (Turok et al., 2026).
+  Within each block of size ``block_size``, iteratively unmask positions
+  according to a deterministic rule; blocks are processed autoregressively
+  (preceding blocks provide context).  No MC averaging needed.
 
 Run: Not runnable directly; use pipeline eval entrypoints (e.g. dllm.pipelines.a2d.eval).
 """
 
 from dataclasses import dataclass
 from functools import partial
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -16,6 +23,7 @@ from lm_eval.api.instance import Instance
 from tqdm import tqdm
 
 from dllm.core.eval.base import BaseEvalConfig, BaseEvalHarness
+from dllm.core.eval.mdlm import DUEL_RULE_FNS, DUEL_RULES
 from dllm.core.samplers import BD3LMSampler, BD3LMSamplerConfig
 from dllm.core.trainers.bd3lm import _create_bd3lm_attention_mask
 
@@ -37,11 +45,14 @@ class BD3LMEvalConfig(BaseEvalConfig):
     batch_size: int = 32
     mc_num: int = 128
     block_size: int = 32
+    ll_method: str = "elbo"
+    duel_rule: str = "prob_margin"
+    duel_k: int = 1
 
 
 class BD3LMEvalHarness(BaseEvalHarness):
     """
-    BD3LM eval: loglikelihood via MC ELBO + generate_until via BD3LMSampler.
+    BD3LM eval: loglikelihood via MC ELBO or DUEL + generate_until via BD3LMSampler.
     """
 
     def __init__(
@@ -66,7 +77,22 @@ class BD3LMEvalHarness(BaseEvalHarness):
         self.mc_num = int(kwargs.get("mc_num", eval_config.mc_num))
         self.block_size_ll = int(kwargs.get("block_size", eval_config.block_size))
 
-        assert self.mc_num % self.batch_size == 0
+        self.ll_method: Literal["elbo", "duel"] = str(
+            kwargs.get("ll_method", eval_config.ll_method)
+        ).lower()
+        self.duel_rule = str(
+            kwargs.get("duel_rule", eval_config.duel_rule)
+        ).lower()
+        self.duel_k = int(kwargs.get("duel_k", eval_config.duel_k))
+
+        assert self.ll_method in ("elbo", "duel"), (
+            f"ll_method must be 'elbo' or 'duel', got '{self.ll_method}'"
+        )
+        assert self.duel_rule in DUEL_RULES, (
+            f"duel_rule must be one of {DUEL_RULES}, got '{self.duel_rule}'"
+        )
+        if self.ll_method == "elbo":
+            assert self.mc_num % self.batch_size == 0
 
     # ── Private helpers ──────────────────────────────────────────────
 
@@ -186,7 +212,9 @@ class BD3LMEvalHarness(BaseEvalHarness):
         return logits
 
     @torch.no_grad()
-    def _get_loglikelihood(self, prefix: torch.Tensor, target: torch.Tensor) -> float:
+    def _get_loglikelihood_elbo(
+        self, prefix: torch.Tensor, target: torch.Tensor
+    ) -> float:
         """Monte Carlo ELBO estimate using BD3LM's block-diagonal forward pass."""
         seq = torch.cat([prefix, target])[None, :]
         seq = seq.repeat((self.batch_size, 1)).to(self.device)
@@ -211,12 +239,79 @@ class BD3LMEvalHarness(BaseEvalHarness):
 
         return -sum(loss_acc) / len(loss_acc)
 
+    @torch.no_grad()
+    def _get_loglikelihood_duel(
+        self, prefix: torch.Tensor, target: torch.Tensor
+    ) -> float:
+        """DUEL exact likelihood for BD3LM (Turok et al., 2026).
+
+        Processes blocks autoregressively: preceding blocks are fully revealed
+        (clean x_0 context).  Within each block, deterministic unmasking
+        accumulates log p(true token) at each step.
+        """
+        clean = torch.cat([prefix, target]).to(self.device)
+        seq_1d = clean.clone()
+        seq_1d = self._pad_to_block(seq_1d.unsqueeze(0)).squeeze(0)
+        padded_len = seq_1d.shape[0]
+        bs = self.block_size_ll
+
+        noisy = seq_1d.clone()
+        target_start = len(prefix)
+        noisy[target_start:] = self.mask_id
+
+        rule_fn = DUEL_RULE_FNS[self.duel_rule]
+        ll = 0.0
+
+        num_blocks = padded_len // bs
+        for block_idx in range(num_blocks):
+            block_start = block_idx * bs
+            block_end = block_start + bs
+
+            block_masked = (noisy[block_start:block_end] == self.mask_id)
+            if not block_masked.any():
+                continue
+
+            while True:
+                masked_local = (noisy[block_start:block_end] == self.mask_id).nonzero(
+                    as_tuple=False
+                ).squeeze(-1)
+                if masked_local.numel() == 0:
+                    break
+
+                noisy_batch = noisy.unsqueeze(0)
+                clean_batch = seq_1d.unsqueeze(0)
+                logits = self._get_logits_bd3lm(noisy_batch, clean_batch)
+                probs = torch.softmax(logits[0].float(), dim=-1)
+
+                global_masked = masked_local + block_start
+                k = min(self.duel_k, masked_local.numel())
+                selected_local = rule_fn(masked_local, probs[block_start:block_end], k)
+                selected_global = selected_local + block_start
+
+                for pos in selected_global:
+                    ll += torch.log(probs[pos, seq_1d[pos]] + 1e-30).item()
+
+                noisy[selected_global] = seq_1d[selected_global]
+
+        return ll
+
+    @torch.no_grad()
+    def _get_loglikelihood(self, prefix: torch.Tensor, target: torch.Tensor) -> float:
+        if self.ll_method == "duel":
+            return self._get_loglikelihood_duel(prefix, target)
+        return self._get_loglikelihood_elbo(prefix, target)
+
     # ── Public API (lm-eval interface) ────────────────────────────────
 
     @torch.no_grad()
     def loglikelihood(self, requests: list[Instance]) -> list[tuple[float, bool]]:
+        method_label = (
+            f"DUEL ({self.duel_rule}, k={self.duel_k})"
+            if self.ll_method == "duel"
+            else f"MC ELBO (mc_num={self.mc_num})"
+        )
         out = []
-        for instance in tqdm(requests, desc="BD3LM loglikelihood (MC ELBO)..."):
+        for instance in tqdm(requests, desc=f"BD3LM loglikelihood [{method_label}]..."):
             context_enc, continuation_enc = self._encode_pair(*instance.args)
             assert len(context_enc) + len(continuation_enc) <= self.max_length, (
                 f"Context + continuation length exceeds {self.max_length} tokens: "

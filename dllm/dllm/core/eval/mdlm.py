@@ -1,11 +1,21 @@
 """
-Generic MDLM eval harness with loglikelihood (Monte Carlo) and generate_until.
+Generic MDLM eval harness with loglikelihood and generate_until.
+
+Supports two likelihood estimators (controlled by ``ll_method`` kwarg):
+
+- **elbo** (default): Monte Carlo ELBO — random masking + importance weighting,
+  averaged over ``mc_num`` samples.  Same as Sahoo et al. (2024).
+- **duel**: Exact likelihood via deterministic unmasking (Turok et al., 2026).
+  Iteratively unmasks positions according to a deterministic rule, accumulating
+  log p(true token) at each step.  No MC averaging needed.
+
 Pipelines inherit and provide EvalConfig + @register_model.
 
-Run: Not runnable directly; use pipeline eval entrypoints (e.g. dllm.pipelines.llada.eval).
+Run: Not runnable directly; use pipeline eval entrypoints (e.g. dllm.pipelines.a2d.eval).
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +24,8 @@ from tqdm import tqdm
 
 from dllm.core.eval.base import BaseEvalConfig, BaseEvalHarness
 from dllm.core.samplers import MDLMSampler, MDLMSamplerConfig
+
+DUEL_RULES = ("left_to_right", "greedy_confidence", "prob_margin")
 
 
 def _parse_token_list(value):
@@ -30,6 +42,42 @@ def _parse_token_list(value):
     if value is None:
         return []
     return []
+
+
+# ── DUEL unmasking rules ──────────────────────────────────────────────
+
+def _select_positions_left_to_right(
+    masked_positions: torch.Tensor, probs: torch.Tensor, k: int
+) -> torch.Tensor:
+    """Unmask the k leftmost masked positions."""
+    return masked_positions[:k]
+
+
+def _select_positions_greedy_confidence(
+    masked_positions: torch.Tensor, probs: torch.Tensor, k: int
+) -> torch.Tensor:
+    """Unmask k positions with highest top-1 probability."""
+    top1 = probs[masked_positions].max(dim=-1).values
+    _, order = top1.sort(descending=True)
+    return masked_positions[order[:k]]
+
+
+def _select_positions_prob_margin(
+    masked_positions: torch.Tensor, probs: torch.Tensor, k: int
+) -> torch.Tensor:
+    """Unmask k positions with largest gap between top-1 and top-2 probabilities."""
+    p = probs[masked_positions]
+    top2 = p.topk(2, dim=-1).values
+    margin = top2[:, 0] - top2[:, 1]
+    _, order = margin.sort(descending=True)
+    return masked_positions[order[:k]]
+
+
+DUEL_RULE_FNS = {
+    "left_to_right": _select_positions_left_to_right,
+    "greedy_confidence": _select_positions_greedy_confidence,
+    "prob_margin": _select_positions_prob_margin,
+}
 
 
 @dataclass
@@ -49,6 +97,9 @@ class MDLMEvalConfig(BaseEvalConfig):
     batch_size: int = 32
     mc_num: int = 128
     is_check_greedy: bool = False
+    ll_method: str = "elbo"
+    duel_rule: str = "prob_margin"
+    duel_k: int = 1
 
 
 class MDLMEvalHarness(BaseEvalHarness):
@@ -64,7 +115,6 @@ class MDLMEvalHarness(BaseEvalHarness):
         eval_config = eval_config or MDLMEvalConfig()
         sampler_config = sampler_config or MDLMEvalSamplerConfig()
 
-        # Parse token list strings so _build_config puts them into sampler_config
         for key in ("suppress_tokens", "begin_suppress_tokens"):
             kwargs[key] = _parse_token_list(
                 kwargs.get(key, getattr(sampler_config, key, None))
@@ -84,7 +134,22 @@ class MDLMEvalHarness(BaseEvalHarness):
             "is_check_greedy", eval_config.is_check_greedy
         )
 
-        assert self.mc_num % self.batch_size == 0
+        self.ll_method: Literal["elbo", "duel"] = str(
+            kwargs.get("ll_method", eval_config.ll_method)
+        ).lower()
+        self.duel_rule = str(
+            kwargs.get("duel_rule", eval_config.duel_rule)
+        ).lower()
+        self.duel_k = int(kwargs.get("duel_k", eval_config.duel_k))
+
+        assert self.ll_method in ("elbo", "duel"), (
+            f"ll_method must be 'elbo' or 'duel', got '{self.ll_method}'"
+        )
+        assert self.duel_rule in DUEL_RULES, (
+            f"duel_rule must be one of {DUEL_RULES}, got '{self.duel_rule}'"
+        )
+        if self.ll_method == "elbo":
+            assert self.mc_num % self.batch_size == 0
 
     # ── Private helpers (low-level → high-level) ───────────────────────
 
@@ -148,8 +213,10 @@ class MDLMEvalHarness(BaseEvalHarness):
         return noisy_batch, p_mask
 
     @torch.no_grad()
-    def _get_loglikelihood(self, prefix: torch.Tensor, target: torch.Tensor) -> float:
-        """Monte Carlo estimate of log-likelihood via _forward_process + _get_logits."""
+    def _get_loglikelihood_elbo(
+        self, prefix: torch.Tensor, target: torch.Tensor
+    ) -> float:
+        """Monte Carlo ELBO estimate via random masking + importance weighting."""
         seq = torch.concatenate([prefix, target])[None, :]
         seq = seq.repeat((self.batch_size, 1)).to(self.device)
         prompt_index = torch.arange(seq.shape[1], device=self.device) < len(prefix)
@@ -169,6 +236,50 @@ class MDLMEvalHarness(BaseEvalHarness):
             loss_acc.append(loss.item())
 
         return -sum(loss_acc) / len(loss_acc)
+
+    @torch.no_grad()
+    def _get_loglikelihood_duel(
+        self, prefix: torch.Tensor, target: torch.Tensor
+    ) -> float:
+        """DUEL exact likelihood via deterministic unmasking (Turok et al., 2026).
+
+        Iteratively: run denoiser → select positions via rule F → accumulate
+        log p(true token) → reveal true tokens.  Single deterministic path,
+        no MC averaging.
+        """
+        seq_len = len(prefix) + len(target)
+        seq = torch.full((1, seq_len), self.mask_id, dtype=torch.long, device=self.device)
+        seq[0, : len(prefix)] = prefix.to(self.device)
+        clean = torch.cat([prefix, target]).to(self.device)
+        prompt_index = torch.arange(seq_len, device=self.device) < len(prefix)
+
+        rule_fn = DUEL_RULE_FNS[self.duel_rule]
+        target_start = len(prefix)
+        ll = 0.0
+
+        while True:
+            masked_positions = (seq[0] == self.mask_id).nonzero(as_tuple=False).squeeze(-1)
+            if masked_positions.numel() == 0:
+                break
+
+            logits = self._get_logits(seq, prompt_index)
+            probs = torch.softmax(logits[0].float(), dim=-1)
+
+            k = min(self.duel_k, masked_positions.numel())
+            positions = rule_fn(masked_positions, probs, k)
+
+            for pos in positions:
+                ll += torch.log(probs[pos, clean[pos]] + 1e-30).item()
+
+            seq[0, positions] = clean[positions]
+
+        return ll
+
+    @torch.no_grad()
+    def _get_loglikelihood(self, prefix: torch.Tensor, target: torch.Tensor) -> float:
+        if self.ll_method == "duel":
+            return self._get_loglikelihood_duel(prefix, target)
+        return self._get_loglikelihood_elbo(prefix, target)
 
     @torch.no_grad()
     def _suffix_greedy_prediction(
@@ -203,8 +314,13 @@ class MDLMEvalHarness(BaseEvalHarness):
 
     @torch.no_grad()
     def loglikelihood(self, requests: list[Instance]) -> list[tuple[float, bool]]:
+        method_label = (
+            f"DUEL ({self.duel_rule}, k={self.duel_k})"
+            if self.ll_method == "duel"
+            else f"MC ELBO (mc_num={self.mc_num})"
+        )
         out = []
-        for instance in tqdm(requests, desc="Computing likelihood..."):
+        for instance in tqdm(requests, desc=f"MDLM loglikelihood [{method_label}]..."):
             context_enc, continuation_enc = self._encode_pair(*instance.args)
             assert len(context_enc) + len(continuation_enc) <= self.max_length, (
                 f"Context + continuation length exceeds {self.max_length} tokens: "
