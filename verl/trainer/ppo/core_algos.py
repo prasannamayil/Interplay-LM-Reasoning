@@ -2161,6 +2161,124 @@ def compute_policy_loss_gspo_kl_cov(
     return pg_loss, torch.tensor(0.0, device=pg_loss.device), ppo_kl_abs, torch.tensor(0.0, device=pg_loss.device)
 
 
+@register_policy_loss("dpg")
+def compute_policy_loss_dpg(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Delightful Policy Gradient (token-level / GRPO variant).
+
+    Gates each token's policy gradient by sigmoid(delight / eta), where
+    delight = advantage * surprisal and surprisal = -log pi(a_t | h_t).
+    Breakthroughs (rare correct actions) get gate ~1; blunders (rare wrong
+    actions) get gate ~0; common actions stay near 0.5.
+
+    Reference: "Delightful Policy Gradient" (Algorithm 1, discrete actions).
+    """
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    clip_ratio = config.clip_ratio
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
+    clip_ratio_c = config.get("clip_ratio_c", 3.0)
+    dpg_eta = getattr(config.policy_loss, "dpg_eta", 1.0)
+
+    negative_approx_kl = log_prob - old_log_prob
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    # Surprisal (action NLL under current policy)
+    surprisal = -log_prob.detach()
+    # Delight = advantage * surprisal
+    delight = advantages.detach() * surprisal
+    # Sigmoid gate
+    gate = torch.sigmoid(delight / dpg_eta)
+
+    # Standard clipped PG, then multiply by gate
+    pg_losses1 = -advantages * ratio
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+
+    pg_losses3 = -advantages * clip_ratio_c
+    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+    pg_clipfrac_lower = verl_F.masked_mean(
+        torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
+    )
+    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+
+    # Apply delightful gate: w_t * U_t * ratio * grad(log pi)
+    pg_losses = gate * pg_losses
+
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+@register_policy_loss("gspo_dpg")
+def compute_policy_loss_gspo_dpg(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Delightful Policy Gradient (trace-level / GSPO variant).
+
+    The entire response is treated as a single action. Surprisal is the
+    mean token NLL over the sequence, advantage is sequence-level (constant
+    across tokens). The sigmoid gate is computed per-sequence and broadcast
+    to all tokens.
+
+    Uses GSPO's sequence-level importance ratio for the base objective.
+    """
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+    dpg_eta = getattr(config.policy_loss, "dpg_eta", 1.0)
+
+    negative_approx_kl = log_prob - old_log_prob
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+
+    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+    # Sequence-level surprisal: mean NLL over the response
+    surprisal_seq = torch.sum(-log_prob.detach() * response_mask, dim=-1) / seq_lengths
+    # Sequence-level advantage (already constant across tokens; take first valid)
+    adv_seq = torch.sum(advantages.detach() * response_mask, dim=-1) / seq_lengths
+    # Delight and gate per sequence, broadcast to tokens
+    delight_seq = adv_seq * surprisal_seq
+    gate_seq = torch.sigmoid(delight_seq / dpg_eta).unsqueeze(-1)
+
+    pg_losses1 = -advantages * seq_importance_ratio
+    pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    # Apply sequence-level delightful gate
+    pg_losses = gate_seq * pg_losses
+
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean")
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
     """Compute categorical entropy loss (For backward compatibility)
 

@@ -37,13 +37,14 @@ class PolicyLossConfig(BaseConfig):
     Args:
         loss_mode (str): Loss function mode. Options: 'vanilla', 'gspo', 'clip_cov', 'kl_cov', 'gpg',
             'ent_cov', 'ent_cov_is', 'gspo_ent_cov', 'gspo_ent_cov_is', 'gspo_clip_cov', 'gspo_kl_cov',
-            'gspo_mgpo', 'gspo_lowacc', 'geo_mean'.
+            'gspo_mgpo', 'gspo_lowacc', 'geo_mean', 'dpg', 'gspo_dpg'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
         use_is_weighted_cov (bool): If True, compute covariance using IS-weighted advantages.
+        dpg_eta (float): Temperature for the Delightful Policy Gradient sigmoid gate (default 1.0).
         ent_cov_alpha (float): Strength multiplier for Ent-Cov shaping (0.0 to 1.0).
         ent_cov_alpha_end (float): Final alpha value for scheduled decay (None means constant).
         ent_cov_alpha_schedule (str): Schedule type for alpha: "constant", "linear", "cosine".
@@ -61,6 +62,8 @@ class PolicyLossConfig(BaseConfig):
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
     use_is_weighted_cov: bool = False
+    # Delightful Policy Gradient parameters
+    dpg_eta: float = 1.0
     # Ent-Cov parameters
     ent_cov_alpha: float = 1.0
     ent_cov_alpha_end: Optional[float] = None
