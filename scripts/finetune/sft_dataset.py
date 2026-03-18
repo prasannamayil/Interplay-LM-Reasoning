@@ -80,6 +80,15 @@ def split_messages(messages: list[dict]) -> tuple[list[dict], str]:
     return messages[:-1], response
 
 
+def is_valid_sft_example(example: dict) -> bool:
+    """Return True if the example has a non-empty assistant/target response (for filtering)."""
+    try:
+        _prompt, response = extract_prompt_response(example)
+        return bool(response and response.strip())
+    except (ValueError, KeyError):
+        return False
+
+
 def extract_prompt_response(example: dict) -> tuple[str, str]:
     if "messages" in example:
         messages = example["messages"]

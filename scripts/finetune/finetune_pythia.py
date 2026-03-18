@@ -23,7 +23,7 @@ from transformers import (
     TrainingArguments,
 )
 
-from sft_dataset import load_dataset_for_ar, tokenize_sft_example
+from sft_dataset import load_dataset_for_ar, tokenize_sft_example, is_valid_sft_example
 
 
 def main():
@@ -53,6 +53,8 @@ def main():
     parser.add_argument("--bf16", action="store_true", default=False)
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
+    parser.add_argument("--no_fsdp", action="store_true", default=False,
+                        help="Disable FSDP (use plain DDP). Avoids deepspeed import on nodes without nvcc.")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
@@ -68,6 +70,14 @@ def main():
         args.dataset,
         load_preprocessed_data=args.load_preprocessed_data,
     )
+    # Drop examples with empty assistant response (e.g. some UltraChat rows)
+    train_columns = dataset["train"].column_names
+    if not {"input_ids", "labels"}.issubset(set(train_columns)):
+        dataset = dataset.filter(
+            is_valid_sft_example,
+            num_proc=8,
+            desc="Filter valid SFT examples",
+        )
     train_columns = dataset["train"].column_names
     if not {"input_ids", "labels"}.issubset(set(train_columns)):
         dataset = dataset.map(
@@ -76,8 +86,18 @@ def main():
             remove_columns=train_columns,
             desc="Tokenizing",
         )
+    # Collator can only batch input_ids/labels (and optionally attention_mask). Drop any
+    # other columns (e.g. prompt, prompt_id, messages, prompt_len) so we don't get
+    # "too many dimensions 'str'" or similar when loading preprocessed data.
+    train_columns = dataset["train"].column_names
+    keep_for_collator = {"input_ids", "labels"}
+    if "attention_mask" in train_columns:
+        keep_for_collator.add("attention_mask")
+    drop_cols = [c for c in train_columns if c not in keep_for_collator]
+    if drop_cols:
+        dataset = dataset.remove_columns(drop_cols)
     train_dataset = dataset["train"]
-    eval_dataset = dataset.get("test", None)
+    eval_dataset = dataset.get("val", dataset.get("test", None))
     evaluation_strategy = "steps" if eval_dataset is not None else "no"
 
     training_args = TrainingArguments(
@@ -91,15 +111,17 @@ def main():
         lr_scheduler_type=args.lr_scheduler_type,
         bf16=args.bf16,
         logging_steps=args.logging_steps,
-        evaluation_strategy=evaluation_strategy,
+        eval_strategy=evaluation_strategy,
         eval_steps=args.eval_steps,
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         report_to="wandb",
         run_name=os.path.basename(args.output_dir),
         ddp_find_unused_parameters=False,
-        fsdp="full_shard auto_wrap",
-        fsdp_config={"fsdp_transformer_layer_cls_to_wrap": "GPTNeoXLayer"},
+        **({}  if args.no_fsdp else {
+            "fsdp": "full_shard auto_wrap",
+            "fsdp_config": {"fsdp_transformer_layer_cls_to_wrap": "GPTNeoXLayer"},
+        }),
         gradient_checkpointing=True,
         dataloader_num_workers=4,
         remove_unused_columns=False,

@@ -22,16 +22,22 @@
 #   BASE_MODEL     Optional override for the pretrained/base model path or HF id
 #   BLOCK_SIZE     BD3LM block size for eval (default: 32)
 #   MC_NUM         MC samples for diffusion loglikelihood (default: 32)
+#   LL_METHOD      Likelihood method for diffusion: elbo | duel (default: elbo)
+#   DUEL_RULE      Unmasking rule for DUEL: left_to_right | greedy_confidence | prob_margin (default: prob_margin)
+#   DUEL_K         Positions to unmask per step for DUEL (default: 1)
 #   LONG_STEPS     Diffusion denoising steps for long-form generation (default: 256)
 #   LONG_MAX_NEW_TOKENS  Generation length for long-form tasks (default: 256)
 #   AR_BATCH_SIZE  Batch size for AR evals (default: auto)
 #   DIFF_BATCH_SIZE Batch size for diffusion evals (default: 32)
+#   VAL_DATASET    Path to preprocessed validation dataset for NLL/PPL eval (default: empty = skip)
+#   VAL_NUM_EXAMPLES  Max examples for val NLL eval (default: 500)
 #
 # Notes:
 #   - Cloze results are written directly under checkpoint directories to stay
 #     compatible with existing analysis code and artifacts.
 #   - Generative task groups are written under checkpoint directories as
 #     <group>/<task>/... so different few-shot settings can be rerun cleanly.
+#   - Validation NLL/PPL is written to <out_dir>/val_nll/results.json.
 # =============================================================================
 
 set -euo pipefail
@@ -62,12 +68,17 @@ INCLUDE_BASE="${INCLUDE_BASE:-0}"
 BASE_MODEL="${BASE_MODEL:-}"
 BLOCK_SIZE="${BLOCK_SIZE:-32}"
 MC_NUM="${MC_NUM:-32}"
+LL_METHOD="${LL_METHOD:-duel}"
+DUEL_RULE="${DUEL_RULE:-prob_margin}"
+DUEL_K="${DUEL_K:-1}"
 LONG_STEPS="${LONG_STEPS:-256}"
 LONG_MAX_NEW_TOKENS="${LONG_MAX_NEW_TOKENS:-256}"
 AR_BATCH_SIZE="${AR_BATCH_SIZE:-auto}"
 DIFF_BATCH_SIZE="${DIFF_BATCH_SIZE:-32}"
+VAL_DATASET="${VAL_DATASET:-}"
+VAL_NUM_EXAMPLES="${VAL_NUM_EXAMPLES:-500}"
 
-CLOZE_TASKS_DEFAULT="hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,mmlu,commonsense_qa"
+CLOZE_TASKS_DEFAULT="hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,mmlu,commonsense_qa,lambada_openai"
 CLOZE_TASKS="${TASKS:-${CLOZE_TASKS_DEFAULT}}"
 OUTPUT_BASE="${PROJECT_ROOT}/results/finetune_eval/${MODEL_TYPE}/${RUN_NAME}"
 
@@ -107,7 +118,8 @@ resolve_base_model() {
 
 has_eval_results() {
     local out_dir="$1"
-    [[ -n "$(find "$out_dir" -type f \( -name "results.json" -o -name "results_*.json" \) -print -quit)" ]]
+    [[ -d "$out_dir" ]] || return 1
+    [[ -n "$(find "$out_dir" -type f \( -name "results.json" -o -name "results_*.json" \) -print -quit 2>/dev/null)" ]]
 }
 
 add_task_spec() {
@@ -147,6 +159,12 @@ echo "Output: ${OUTPUT_BASE}"
 echo "GPUs: ${NGPUS} | Max finetune checkpoints: ${NUM_CKPTS}"
 echo "Task group: ${TASK_GROUP}"
 echo "Include base: ${INCLUDE_BASE}"
+if [[ "$MODEL_TYPE" == "mdlm" || "$MODEL_TYPE" == "bd3lm" ]]; then
+    echo "LL method: ${LL_METHOD} | DUEL rule: ${DUEL_RULE} | DUEL k: ${DUEL_K}"
+fi
+if [[ -n "$VAL_DATASET" ]]; then
+    echo "Val NLL dataset: ${VAL_DATASET} (max ${VAL_NUM_EXAMPLES} examples)"
+fi
 echo "============================================================"
 
 # =============================================================================
@@ -260,10 +278,12 @@ launch_eval() {
                 block_arg="block_size=${BLOCK_SIZE}"
             fi
 
+            local ll_args="ll_method=${LL_METHOD},duel_rule=${DUEL_RULE},duel_k=${DUEL_K}"
+
             if [[ "$profile" == "short" ]]; then
-                model_args="pretrained=${model_path},max_new_tokens=3,steps=3,${block_arg},cfg_scale=0.0,mc_num=${MC_NUM}"
+                model_args="pretrained=${model_path},max_new_tokens=3,steps=3,${block_arg},cfg_scale=0.0,mc_num=${MC_NUM},${ll_args}"
             else
-                model_args="pretrained=${model_path},max_new_tokens=${LONG_MAX_NEW_TOKENS},steps=${LONG_STEPS},${block_arg},cfg_scale=0.0"
+                model_args="pretrained=${model_path},max_new_tokens=${LONG_MAX_NEW_TOKENS},steps=${LONG_STEPS},${block_arg},cfg_scale=0.0,${ll_args}"
             fi
 
             if [[ "$group_name" != "cloze" ]]; then
@@ -347,6 +367,76 @@ if [[ "${#PIDS[@]}" -gt 0 ]]; then
         job_name="${JOB_NAMES[$idx]}"
         wait "$pid" || echo "  Warning: ${job_name} exited with error"
     done
+fi
+
+# =============================================================================
+# Validation NLL / PPL evaluation (on held-out SFT data)
+# =============================================================================
+if [[ -n "$VAL_DATASET" ]]; then
+    echo ""
+    echo "============================================================"
+    echo "Validation NLL/PPL on held-out data: ${VAL_DATASET}"
+    echo "============================================================"
+
+    VAL_PIDS=()
+    VAL_JOB_NAMES=()
+    GPU_IDX=0
+
+    for item in "${EVAL_ITEMS[@]}"; do
+        IFS='|' read -r item_name item_path <<< "$item"
+        val_out_dir="${OUTPUT_BASE}/${item_name}/val_nll"
+
+        if [[ -f "$val_out_dir/results.json" ]]; then
+            echo "[Skip] ${item_name}/val_nll already evaluated"
+            continue
+        fi
+
+        gpu="${GPU_ARRAY[$GPU_IDX]}"
+        GPU_IDX=$(( (GPU_IDX + 1) % NGPUS ))
+
+        echo "[Val NLL] ${item_name} on GPU ${gpu}"
+        mkdir -p "$val_out_dir"
+        local_log="$val_out_dir/eval.log"
+
+        val_extra_args=(
+            --model_type "$MODEL_TYPE"
+            --model_path "$item_path"
+            --val_dataset "$VAL_DATASET"
+            --output_path "$val_out_dir"
+            --max_examples "$VAL_NUM_EXAMPLES"
+        )
+        if [[ "$MODEL_TYPE" == "bd3lm" || "$MODEL_TYPE" == "mdlm" ]]; then
+            val_extra_args+=(
+                --block_size "$BLOCK_SIZE"
+                --mc_num "$MC_NUM"
+                --ll_method "$LL_METHOD"
+                --duel_rule "$DUEL_RULE"
+                --duel_k "$DUEL_K"
+            )
+        fi
+
+        CUDA_VISIBLE_DEVICES="$gpu" python "${PROJECT_ROOT}/scripts/finetune/eval_val_nll.py" \
+            "${val_extra_args[@]}" \
+            > "$local_log" 2>&1 &
+        VAL_PIDS+=("$!")
+        VAL_JOB_NAMES+=("${item_name}/val_nll")
+
+        if [[ "${#VAL_PIDS[@]}" -ge "$NGPUS" ]]; then
+            echo "  Waiting for val NLL batch..."
+            for idx in "${!VAL_PIDS[@]}"; do
+                wait "${VAL_PIDS[$idx]}" || echo "  Warning: ${VAL_JOB_NAMES[$idx]} exited with error"
+            done
+            VAL_PIDS=()
+            VAL_JOB_NAMES=()
+        fi
+    done
+
+    if [[ "${#VAL_PIDS[@]}" -gt 0 ]]; then
+        echo "  Waiting for final val NLL batch..."
+        for idx in "${!VAL_PIDS[@]}"; do
+            wait "${VAL_PIDS[$idx]}" || echo "  Warning: ${VAL_JOB_NAMES[$idx]} exited with error"
+        done
+    fi
 fi
 
 echo ""

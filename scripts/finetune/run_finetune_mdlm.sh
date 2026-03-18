@@ -20,6 +20,7 @@ DATASET_TAG="${DATASET_TAG:-alpaca}"
 LOAD_PREPROCESSED_DATA="${LOAD_PREPROCESSED_DATA:-0}"
 NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-3}"
 SAVE_STEPS="${SAVE_STEPS:-200}"
+SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-20}"
 MAX_LENGTH="${MAX_LENGTH:-512}"
 OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE:-${PROJECT_ROOT}/results/finetune/pythia-${SIZE}-mdlm-${DATASET_TAG}}"
 
@@ -53,7 +54,7 @@ CMD=(
     --per_device_train_batch_size 4
     --gradient_accumulation_steps 4
     --save_steps "${SAVE_STEPS}"
-    --save_total_limit 20
+    --save_total_limit "${SAVE_TOTAL_LIMIT}"
     --logging_steps 10
     --report_to wandb
     --run_name "pythia-${SIZE}-mdlm-${DATASET_TAG}"

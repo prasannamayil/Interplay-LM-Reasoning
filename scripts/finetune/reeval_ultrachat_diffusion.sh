@@ -1,13 +1,17 @@
 #!/bin/bash
 # =============================================================================
 # Re-evaluate diffusion ultrachat checkpoints with --log_samples to get
-# per-instance MC-ELBO log-likelihoods for loss-to-loss and margin analysis.
+# per-instance log-likelihoods for loss-to-loss and margin analysis.
+#
+# Supports both MC-ELBO (default) and DUEL exact likelihood.
+# Set LL_METHOD=duel DUEL_RULE=prob_margin DUEL_K=1 for DUEL evaluation.
 #
 # This script re-runs cloze evals for BD3LM (bs=1, bs=16) and MDLM ultrachat
 # checkpoints, writing results to results/finetune_eval_samples/ so existing
 # aggregate-only results in results/finetune_eval/ are untouched.
 #
 # Usage: bash scripts/finetune/reeval_ultrachat_diffusion.sh [2.8b]
+#        LL_METHOD=duel bash scripts/finetune/reeval_ultrachat_diffusion.sh [2.8b]
 # =============================================================================
 
 set -euo pipefail
@@ -22,9 +26,12 @@ GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
 IFS=',' read -ra GPU_ARRAY <<< "${GPU_LIST}"
 NGPUS="${#GPU_ARRAY[@]}"
 
-NUM_CKPTS="${NUM_CKPTS:-10}"
+NUM_CKPTS="${NUM_CKPTS:-20}"
 INCLUDE_BASE="${INCLUDE_BASE:-1}"
 MC_NUM="${MC_NUM:-32}"
+LL_METHOD="${LL_METHOD:-duel}"
+DUEL_RULE="${DUEL_RULE:-prob_margin}"
+DUEL_K="${DUEL_K:-1}"
 DIFF_BATCH_SIZE="${DIFF_BATCH_SIZE:-32}"
 TASKS="${TASKS:-hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,mmlu,commonsense_qa,lambada_openai}"
 LAUNCH_DELAY="${LAUNCH_DELAY:-15}"  # seconds between launches to avoid HF rate limits
@@ -89,7 +96,11 @@ echo "============================================================"
 echo "Re-eval diffusion ultrachat models (with --log_samples)"
 echo "  Output root: ${OUTPUT_ROOT}"
 echo "  GPUs: ${NGPUS} | Checkpoints: ${NUM_CKPTS} | Base: ${INCLUDE_BASE}"
-echo "  MC_NUM: ${MC_NUM} | Tasks: ${TASKS}"
+echo "  LL_METHOD: ${LL_METHOD} | MC_NUM: ${MC_NUM}"
+if [[ "$LL_METHOD" == "duel" ]]; then
+    echo "  DUEL: rule=${DUEL_RULE} k=${DUEL_K}"
+fi
+echo "  Tasks: ${TASKS}"
 echo "  Launch delay: ${LAUNCH_DELAY}s (set LAUNCH_DELAY=0 to disable)"
 echo "============================================================"
 
@@ -131,7 +142,7 @@ for spec in "${RUN_SPECS[@]}"; do
         mkdir -p "$out_dir"
         log_file="$out_dir/eval.log"
 
-        model_args="pretrained=${model_path},max_new_tokens=3,steps=3,block_size=${block_size},cfg_scale=0.0,mc_num=${MC_NUM}"
+        model_args="pretrained=${model_path},max_new_tokens=3,steps=3,block_size=${block_size},cfg_scale=0.0,mc_num=${MC_NUM},ll_method=${LL_METHOD},duel_rule=${DUEL_RULE},duel_k=${DUEL_K}"
 
         echo "[Eval] ${model_type}/${run_name}/${ckpt_name} on GPU ${gpu} (block_size=${block_size})"
         (
