@@ -16,7 +16,7 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, unpack_policy_loss
 from verl.workers.config import ActorConfig
 
 
@@ -43,13 +43,15 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
-        config=config,
+    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra_metrics = unpack_policy_loss(
+        policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=config,
+        )
     )
 
     metrics.update(
@@ -60,6 +62,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
             "pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
         }
     )
+    metrics.update(extra_metrics)
     policy_loss = pg_loss
 
     # add entropy loss

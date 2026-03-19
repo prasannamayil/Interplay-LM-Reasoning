@@ -82,6 +82,10 @@ def compute_ent_cov_alpha(
         # Unknown schedule, fall back to constant
         return alpha_start
 
+PolicyLossReturn = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]
+]
+
 PolicyLossFn = Callable[
     [
         torch.Tensor,  # old_log_prob
@@ -92,8 +96,15 @@ PolicyLossFn = Callable[
         Optional[DictConfig | AlgoConfig],  # config
         torch.Tensor | None,  # rollout_log_probs
     ],
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    PolicyLossReturn,
 ]
+
+
+def unpack_policy_loss(result: PolicyLossReturn):
+    """Unpack policy loss return value into (pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra_metrics)."""
+    if len(result) == 5:
+        return result
+    return (*result, {})
 
 POLICY_LOSS_REGISTRY: dict[str, PolicyLossFn] = {}
 
@@ -2170,7 +2181,7 @@ def compute_policy_loss_dpg(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | ActorConfig] = None,
     rollout_log_probs: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> PolicyLossReturn:
     """
     Delightful Policy Gradient (token-level / GRPO variant).
 
@@ -2214,12 +2225,39 @@ def compute_policy_loss_dpg(
     )
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
 
-    # Apply delightful gate: w_t * U_t * ratio * grad(log pi)
     pg_losses = gate * pg_losses
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    # --- DPG metrics (token-level) ---
+    mask_bool = response_mask.bool()
+    g = gate[mask_bool]
+    d = delight[mask_bool]
+    s = surprisal[mask_bool]
+    adv = advantages.detach()[mask_bool]
+
+    pos_adv = adv > 0
+    neg_adv = adv < 0
+    # Thresholds for breakthrough / blunder classification
+    breakthrough = g > 0.9
+    blunder = g < 0.1
+
+    extra = {
+        "dpg/gate_mean": g.mean().item(),
+        "dpg/gate_std": g.std().item(),
+        "dpg/gate_min": g.min().item(),
+        "dpg/gate_max": g.max().item(),
+        "dpg/delight_mean": d.mean().item(),
+        "dpg/delight_std": d.std().item(),
+        "dpg/surprisal_mean": s.mean().item(),
+        "dpg/breakthrough_frac": breakthrough.float().mean().item(),
+        "dpg/blunder_frac": blunder.float().mean().item(),
+        "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/gate_mean_neg_adv": g[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/effective_coeff_mean": (g * adv).mean().item(),
+    }
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra
 
 
 @register_policy_loss("gspo_dpg")
@@ -2231,7 +2269,7 @@ def compute_policy_loss_gspo_dpg(
     loss_agg_mode: str = "seq-mean-token-mean",
     config: Optional[DictConfig | ActorConfig] = None,
     rollout_log_probs: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> PolicyLossReturn:
     """
     Delightful Policy Gradient (trace-level / GSPO variant).
 
@@ -2262,21 +2300,42 @@ def compute_policy_loss_gspo_dpg(
     adv_seq = torch.sum(advantages.detach() * response_mask, dim=-1) / seq_lengths
     # Delight and gate per sequence, broadcast to tokens
     delight_seq = adv_seq * surprisal_seq
-    gate_seq = torch.sigmoid(delight_seq / dpg_eta).unsqueeze(-1)
+    gate_seq = torch.sigmoid(delight_seq / dpg_eta)
 
     pg_losses1 = -advantages * seq_importance_ratio
     pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
 
-    # Apply sequence-level delightful gate
-    pg_losses = gate_seq * pg_losses
+    pg_losses = gate_seq.unsqueeze(-1) * pg_losses
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean")
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
     pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    # --- DPG metrics (sequence-level) ---
+    g = gate_seq
+    pos_adv = adv_seq > 0
+    neg_adv = adv_seq < 0
+    breakthrough = g > 0.9
+    blunder = g < 0.1
+
+    extra = {
+        "dpg/gate_mean": g.mean().item(),
+        "dpg/gate_std": g.std().item(),
+        "dpg/gate_min": g.min().item(),
+        "dpg/gate_max": g.max().item(),
+        "dpg/delight_mean": delight_seq.mean().item(),
+        "dpg/delight_std": delight_seq.std().item(),
+        "dpg/surprisal_seq_mean": surprisal_seq.mean().item(),
+        "dpg/breakthrough_frac": breakthrough.float().mean().item(),
+        "dpg/blunder_frac": blunder.float().mean().item(),
+        "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/gate_mean_neg_adv": g[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/effective_coeff_mean": (g * adv_seq).mean().item(),
+    }
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra
 
 
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):

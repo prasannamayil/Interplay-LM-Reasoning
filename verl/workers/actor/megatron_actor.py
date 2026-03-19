@@ -35,7 +35,7 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, unpack_policy_loss
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
@@ -316,13 +316,15 @@ class MegatronPPOActor(BasePPOActor):
         loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
         policy_loss_fn = get_policy_loss_fn(loss_mode)
-        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-            old_log_prob=old_log_prob,
-            log_prob=log_prob,
-            advantages=advantages,
-            response_mask=response_mask,
-            loss_agg_mode=loss_agg_mode,
-            config=self.config,
+        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra_metrics = unpack_policy_loss(
+            policy_loss_fn(
+                old_log_prob=old_log_prob,
+                log_prob=log_prob,
+                advantages=advantages,
+                response_mask=response_mask,
+                loss_agg_mode=loss_agg_mode,
+                config=self.config,
+            )
         )
 
         metrics.update(
@@ -333,6 +335,8 @@ class MegatronPPOActor(BasePPOActor):
                 "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
             }
         )
+        for k, v in extra_metrics.items():
+            metrics[f"actor/{k}"] = v
         policy_loss = pg_loss
 
         # add entropy loss
