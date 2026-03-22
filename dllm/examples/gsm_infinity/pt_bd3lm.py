@@ -63,6 +63,14 @@ class DataArguments(dllm.utils.DataArguments):
     drop_tail: bool = True
     insert_eos: bool = True
     load_preprocessed_data: bool = True
+    packing: bool = field(
+        default=False,
+        metadata={"help": (
+            "If True, concatenate+slice into fixed-length chunks (legacy behaviour). "
+            "If False (default), tokenize each example individually to avoid "
+            "cross-example contamination with block-diagonal attention."
+        )},
+    )
 
 
 @dataclass
@@ -181,7 +189,7 @@ def _find_jsonl_files_budgeted(data_dir, op_min, op_max, token_budget_str="all")
 
 
 def _load_raw_jsonl(data_args, tokenizer, training_args):
-    """Load raw JSONL with per-op token budgeting, compose text, tokenize+group."""
+    """Load raw JSONL with per-op token budgeting, compose text, tokenize."""
     import math
 
     from datasets import DatasetDict, concatenate_datasets, load_dataset
@@ -224,16 +232,26 @@ def _load_raw_jsonl(data_args, tokenizer, training_args):
         desc="Composing text from problem/question/solution",
     )
 
-    tokenized_ds = text_ds.map(
-        functools.partial(
+    if data_args.packing:
+        tokenize_fn = functools.partial(
             dllm.utils.tokenize_and_group, tokenizer=tokenizer, text_field="text",
             seq_length=data_args.max_length, insert_eos=data_args.insert_eos,
             drop_tail=data_args.drop_tail,
-        ),
+        )
+        desc = "Tokenizing (packed) into fixed-length chunks"
+    else:
+        tokenize_fn = functools.partial(
+            dllm.utils.tokenize_individual, tokenizer=tokenizer, text_field="text",
+            seq_length=data_args.max_length, insert_eos=data_args.insert_eos,
+        )
+        desc = "Tokenizing individually (no packing)"
+
+    tokenized_ds = text_ds.map(
+        tokenize_fn,
         batched=True, num_proc=data_args.num_proc, remove_columns=["text"],
-        desc="Tokenizing and grouping into fixed-length chunks",
+        desc=desc,
     )
-    logger.info(f"Tokenized: {len(tokenized_ds):,} chunks of {data_args.max_length} tokens")
+    logger.info(f"Tokenized: {len(tokenized_ds):,} sequences")
 
     split = tokenized_ds.train_test_split(test_size=5000, seed=training_args.seed)
     return DatasetDict({"train": split["train"], "test": split["test"]})
@@ -340,10 +358,13 @@ def train():
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("test", None),
         args=training_args,
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer,
-            return_tensors="pt",
-            padding=True,
+        data_collator=dllm.core.trainers.bd3lm.AppendEOSBlockWrapper(
+            transformers.DataCollatorForSeq2Seq(
+                tokenizer,
+                return_tensors="pt",
+                padding=True,
+            ),
+            block_size=training_args.block_size,
         ),
     )
     trainer.train()

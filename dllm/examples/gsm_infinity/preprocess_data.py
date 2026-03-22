@@ -72,13 +72,15 @@ def compose_text(obj: dict) -> str:
 _worker_tokenizer = None
 _worker_seq_length = None
 _worker_tmp_dir = None
+_worker_no_pack = False
 
 
-def _init_worker(tokenizer_path: str, seq_length: int, tmp_dir: str):
-    global _worker_tokenizer, _worker_seq_length, _worker_tmp_dir
+def _init_worker(tokenizer_path: str, seq_length: int, tmp_dir: str, no_pack: bool = False):
+    global _worker_tokenizer, _worker_seq_length, _worker_tmp_dir, _worker_no_pack
     _worker_tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path)
     _worker_seq_length = seq_length
     _worker_tmp_dir = tmp_dir
+    _worker_no_pack = no_pack
 
 
 def _process_one_shard(shard_path: str) -> str:
@@ -88,6 +90,7 @@ def _process_one_shard(shard_path: str) -> str:
     """
     tokenizer = _worker_tokenizer
     seq_length = _worker_seq_length
+    no_pack = _worker_no_pack
     eos_id = tokenizer.eos_token_id
 
     token_buffer = []
@@ -113,13 +116,21 @@ def _process_one_shard(shard_path: str) -> str:
             n_examples += 1
 
             if len(texts_batch) >= batch_size:
-                _tokenize_batch(texts_batch, tokenizer, eos_id,
-                                token_buffer, chunks_ids, seq_length)
+                if no_pack:
+                    _tokenize_batch_no_pack(texts_batch, tokenizer, eos_id,
+                                            chunks_ids, seq_length)
+                else:
+                    _tokenize_batch(texts_batch, tokenizer, eos_id,
+                                    token_buffer, chunks_ids, seq_length)
                 texts_batch = []
 
     if texts_batch:
-        _tokenize_batch(texts_batch, tokenizer, eos_id,
-                        token_buffer, chunks_ids, seq_length)
+        if no_pack:
+            _tokenize_batch_no_pack(texts_batch, tokenizer, eos_id,
+                                    chunks_ids, seq_length)
+        else:
+            _tokenize_batch(texts_batch, tokenizer, eos_id,
+                            token_buffer, chunks_ids, seq_length)
 
     shard_name = os.path.basename(shard_path).replace(".jsonl", "")
     n_chunks = len(chunks_ids)
@@ -142,6 +153,7 @@ def _process_one_shard(shard_path: str) -> str:
 
 
 def _tokenize_batch(texts, tokenizer, eos_id, token_buffer, chunks_ids, seq_length):
+    """Pack multiple examples into fixed-length chunks (legacy, packing mode)."""
     encoded = tokenizer(texts, add_special_tokens=False)["input_ids"]
     for ids in encoded:
         token_buffer.extend(ids)
@@ -150,6 +162,16 @@ def _tokenize_batch(texts, tokenizer, eos_id, token_buffer, chunks_ids, seq_leng
     while len(token_buffer) >= seq_length:
         chunks_ids.append(token_buffer[:seq_length])
         del token_buffer[:seq_length]
+
+
+def _tokenize_batch_no_pack(texts, tokenizer, eos_id, chunks_ids, seq_length):
+    """Tokenize each example individually — one sequence per example, truncated to seq_length."""
+    encoded = tokenizer(texts, add_special_tokens=False, truncation=True, max_length=seq_length)["input_ids"]
+    for ids in encoded:
+        if eos_id is not None:
+            if len(ids) >= seq_length or not ids or ids[-1] != eos_id:
+                ids = ids[: seq_length - 1] + [eos_id]
+        chunks_ids.append(ids)
 
 
 # ---------- Shard discovery ----------
@@ -196,6 +218,10 @@ def main():
                         help="Parallel workers for save_to_disk (speeds up final save)")
     parser.add_argument("--resume", action="store_true",
                         help="Skip tokenization, load existing _tmp_shards and save")
+    parser.add_argument("--no_pack", action="store_true",
+                        help="Tokenize each example individually instead of packing "
+                             "multiple examples into fixed-length chunks. Required for "
+                             "BD3LM to avoid cross-example contamination.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -233,7 +259,7 @@ def main():
         with Pool(
             processes=args.num_workers,
             initializer=_init_worker,
-            initargs=(args.tokenizer_path, args.seq_length, tmp_dir),
+            initargs=(args.tokenizer_path, args.seq_length, tmp_dir, args.no_pack),
         ) as pool:
             shard_paths = list(pool.imap_unordered(_process_one_shard, shard_files))
 

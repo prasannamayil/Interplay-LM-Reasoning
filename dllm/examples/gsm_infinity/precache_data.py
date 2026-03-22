@@ -85,6 +85,9 @@ def main():
     parser.add_argument("--test_split_size", type=int, default=5000)
     parser.add_argument("--num_proc", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no_pack", action="store_true",
+                        help="Tokenize each example individually instead of packing "
+                             "multiple examples into fixed-length chunks.")
     args = parser.parse_args()
 
     if os.path.isfile(os.path.join(args.output_dir, "dataset_dict.json")):
@@ -142,18 +145,28 @@ def main():
         desc="Composing text",
     )
 
-    tokenized_ds = text_ds.map(
-        functools.partial(
+    if args.no_pack:
+        tokenize_fn = functools.partial(
+            dllm.utils.tokenize_individual,
+            tokenizer=tokenizer, text_field="text",
+            seq_length=args.seq_length, insert_eos=True,
+        )
+        desc = "Tokenizing individually (no packing)"
+    else:
+        tokenize_fn = functools.partial(
             dllm.utils.tokenize_and_group,
             tokenizer=tokenizer, text_field="text",
             seq_length=args.seq_length, insert_eos=True, drop_tail=True,
-        ),
+        )
+        desc = "Tokenizing and grouping (packed)"
+
+    tokenized_ds = text_ds.map(
+        tokenize_fn,
         batched=True, num_proc=args.num_proc, remove_columns=["text"],
-        desc="Tokenizing and grouping",
+        desc=desc,
     )
 
-    total_tokens = len(tokenized_ds) * args.seq_length
-    print(f"Tokenized: {len(tokenized_ds):,} chunks x {args.seq_length} = {total_tokens/1e9:.2f}B tokens")
+    print(f"Tokenized: {len(tokenized_ds):,} sequences")
 
     if args.test_split_size > 0 and len(tokenized_ds) > args.test_split_size:
         split = tokenized_ds.train_test_split(test_size=args.test_split_size, seed=args.seed)
