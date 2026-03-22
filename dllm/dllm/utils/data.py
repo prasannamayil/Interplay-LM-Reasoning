@@ -27,6 +27,10 @@ def tokenize_and_group(
     Concatenates all tokenized text and splits into chunks of seq_length.
     Optionally drops incomplete trailing chunks.
 
+    WARNING: This function packs multiple examples into single sequences.
+    For models with block-diagonal attention (e.g. BD3LM), use
+    ``tokenize_individual`` instead to avoid cross-example contamination.
+
     Args:
         examples: Batch of examples with text field.
         tokenizer: Tokenizer to use.
@@ -69,6 +73,49 @@ def tokenize_and_group(
     return {
         "input_ids": chunks,
         "labels": [c[:] for c in chunks],  # Labels are the same as input_ids
+    }
+
+
+def tokenize_individual(
+    examples,
+    tokenizer,
+    text_field: str = "text",
+    seq_length: int = 1024,
+    insert_eos: bool = False,
+    add_special_tokens: bool = False,
+):
+    """
+    Tokenize each example individually, truncating to *seq_length*.
+
+    Unlike ``tokenize_and_group``, this does **not** pack multiple documents
+    into a single sequence.  Each output row corresponds to exactly one input
+    example, which is critical for models whose attention mask assumes
+    single-document sequences (e.g. BD3LM's block-diagonal mask).
+
+    Sequences shorter than *seq_length* are kept as-is (the data collator
+    handles padding).  Sequences longer than *seq_length* are right-truncated.
+    """
+    tokenized = tokenizer(
+        examples[text_field],
+        add_special_tokens=add_special_tokens,
+        truncation=True,
+        max_length=seq_length,
+    )
+    ids = tokenized["input_ids"]
+
+    if insert_eos:
+        eos_id = getattr(tokenizer, "eos_token_id")
+        assert eos_id
+        ids = [
+            (seq[: seq_length - 1] + [eos_id])
+            if (len(seq) >= seq_length or not seq or seq[-1] != eos_id)
+            else seq
+            for seq in ids
+        ]
+
+    return {
+        "input_ids": ids,
+        "labels": [seq[:] for seq in ids],
     }
 
 

@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import transformers
 
-from dllm.core.schedulers import BaseAlphaScheduler, LinearAlphaScheduler
+from dllm.core.schedulers import BaseAlphaScheduler, LinearAlphaScheduler, make_alpha_scheduler
 from dllm.utils.configs import TrainingArguments
 from dllm.utils.data import prepend_bos
 from .utils import NLLMetric, PPLMetric, OnEvaluateMetricsCallback
@@ -28,6 +28,7 @@ class MDLMConfig(TrainingArguments):
     loss_weight_type: str = "scheduler"  # "scheduler", "uniform"
     loss_norm_type: str = "token"  # "batch", "sequence", "token"
     right_shift_logits: bool = False
+    noise_scheduler: str = "LinearAlphaScheduler"
 
 
 class MDLMTrainer(transformers.Trainer):
@@ -44,7 +45,10 @@ class MDLMTrainer(transformers.Trainer):
         if not (0.0 < args.time_epsilon < 1.0):
             raise ValueError("time_epsilon must be in (0, 1)")
 
-        self.scheduler = scheduler if scheduler is not None else LinearAlphaScheduler()
+        if scheduler is not None:
+            self.scheduler = scheduler
+        else:
+            self.scheduler = make_alpha_scheduler(args.noise_scheduler)
         self.time_epsilon = args.time_epsilon
         self.loss_weight_type = args.loss_weight_type
         self.loss_norm_type = args.loss_norm_type
