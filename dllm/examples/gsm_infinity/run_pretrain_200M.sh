@@ -103,7 +103,8 @@ precache() {
         --token_budget "${TOKEN_BUDGET}" \
         --op_min 2 --op_max 10 \
         --seq_length 2048 \
-        --num_proc 64
+        --num_proc 64 \
+        --no_pack
 }
 
 # =============================================================================
