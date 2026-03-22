@@ -43,6 +43,13 @@ class DataArguments(dllm.utils.DataArguments):
         metadata={"help": "Insert EOS between documents."},
     )
     load_preprocessed_data: bool = False
+    packing: bool = field(
+        default=False,
+        metadata={"help": (
+            "If True, concatenate+slice into fixed-length chunks (legacy behaviour). "
+            "If False (default), tokenize each example individually."
+        )},
+    )
 
 
 @dataclass
@@ -85,23 +92,31 @@ def train():
             load_preprocessed_data=data_args.load_preprocessed_data,
         )
         if not data_args.load_preprocessed_data:
-            dataset = dataset.map(
-                functools.partial(
+            if data_args.packing:
+                tokenize_fn = functools.partial(
                     dllm.utils.tokenize_and_group,
                     tokenizer=tokenizer,
                     text_field=data_args.text_field,
                     seq_length=data_args.max_length,
                     insert_eos=data_args.insert_eos,
                     drop_tail=data_args.drop_tail,
-                ),
+                )
+                desc = "Tokenizing FineWeb-Edu (packed) for MDLM"
+            else:
+                tokenize_fn = functools.partial(
+                    dllm.utils.tokenize_individual,
+                    tokenizer=tokenizer,
+                    text_field=data_args.text_field,
+                    seq_length=data_args.max_length,
+                    insert_eos=data_args.insert_eos,
+                )
+                desc = "Tokenizing FineWeb-Edu individually (no packing) for MDLM"
+            dataset = dataset.map(
+                tokenize_fn,
                 batched=True,
                 remove_columns=dataset["train"].column_names,
                 **({} if data_args.streaming else {"num_proc": data_args.num_proc}),
-                **(
-                    {}
-                    if data_args.streaming
-                    else {"desc": "Tokenizing FineWeb-Edu for MDLM"}
-                ),
+                **({} if data_args.streaming else {"desc": desc}),
             )
         if data_args.streaming:
             dataset = dataset.shuffle(seed=training_args.seed)
