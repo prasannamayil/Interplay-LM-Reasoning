@@ -29,6 +29,7 @@ class ScriptArguments:
     drop_tail: bool = True
     remove_columns: bool = False
     num_proc: int = 32
+    packing: bool = False
 
     def __post_init__(self):
         self.model_name_or_path = dllm.utils.resolve_with_base_env(
@@ -46,16 +47,27 @@ def preprocess_pt_dataset(
     drop_tail: bool = True,
     remove_columns: bool = False,
     num_proc: int = 32,
+    packing: bool = False,
 ):
-    processed = dataset.map(
-        partial(
+    if packing:
+        tokenize_fn = partial(
             dllm.utils.tokenize_and_group,
             tokenizer=tokenizer,
             text_field=text_field,
             seq_length=max_length,
             insert_eos=insert_eos,
             drop_tail=drop_tail,
-        ),
+        )
+    else:
+        tokenize_fn = partial(
+            dllm.utils.tokenize_individual,
+            tokenizer=tokenizer,
+            text_field=text_field,
+            seq_length=max_length,
+            insert_eos=insert_eos,
+        )
+    processed = dataset.map(
+        tokenize_fn,
         batched=True,
         num_proc=num_proc,
         remove_columns=dataset["train"].column_names,
@@ -104,6 +116,7 @@ def main():
         drop_tail=args.drop_tail,
         remove_columns=args.remove_columns,
         num_proc=args.num_proc,
+        packing=args.packing,
     )
 
 
