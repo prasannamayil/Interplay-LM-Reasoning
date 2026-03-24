@@ -1,0 +1,112 @@
+# DR-GSPO + DPG (eta=2.0) for Edge, v5
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: false
+
+data:
+  train_files:
+    - data/rl_finetune/train/edge/edge_200k.jsonl
+  val_files:
+    - data/composition_hf/test_small/op2-200.jsonl
+    - data/composition_hf/test_small/op3-200.jsonl
+    - data/composition_hf/test_small/op4-200.jsonl
+    - data/composition_hf/test_small/op5-200.jsonl
+    - data/composition_hf/test_small/op6-200.jsonl
+    - data/composition_hf/test_small/op7-200.jsonl
+    - data/composition_hf/test_small/op8-200.jsonl
+    - data/composition_hf/test_small/op9-200.jsonl
+    - data/composition_hf/test_small/op10-200.jsonl
+    - data/composition_hf/test_small/op11-200.jsonl
+    - data/composition_hf/test_small/op12-200.jsonl
+    - data/composition_hf/test_small/op13-200.jsonl
+    - data/composition_hf/test_small/op14-200.jsonl
+    - data/composition_hf/test_small/op15-200.jsonl
+    - data/composition_hf/test_small/op16-200.jsonl
+    - data/composition_hf/test_small/op17-200.jsonl
+    - data/composition_hf/test_small/op18-200.jsonl
+    - data/composition_hf/test_small/op19-200.jsonl
+    - data/composition_hf/test_small/op20-200.jsonl
+  tokenizer:
+  train_batch_size: 1024
+  val_batch_size: 200
+  max_prompt_length: 1024
+  max_response_length: 1024
+  id_max_op: 10
+  filter_overlong_prompts: true
+  truncation: error
+  custom_cls:
+    path: verl/dataset.py
+    name: CustomRLHFDataset
+
+custom_reward_function:
+  path: verl/dataset.py
+  name: compute_score
+
+actor_rollout_ref:
+  model:
+    path: /fast/pmayilvahanan/Interplay-LM-Reasoning/saves/gsm_infinity/pt_op2-10_10B_alltemps_skewed_v4
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+  actor:
+    optim:
+      lr: 1e-6
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size_per_gpu: 16
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    entropy_coeff: 0.0
+    clip_ratio: 0.0003
+    clip_ratio_low: 0.0003
+    clip_ratio_high: 0.0004
+    loss_agg_mode: seq-mean-token-sum
+    policy_loss:
+      loss_mode: gspo_dpg
+      dpg_eta: 2.0
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: vllm
+    gpu_memory_utilization: 0.6
+    n: 6
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 16
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    val_kwargs:
+      do_sample: true
+      n: 128
+      temperature: 0.7
+      top_p: 1.0
+      top_k: -1
+  ref:
+    log_prob_micro_batch_size_per_gpu: 16
+    fsdp_config:
+      param_offload: true
+
+trainer:
+  critic_warmup: 0
+  logger:
+    - console
+    - wandb
+    - local_json
+  project_name: gsm-infinity-rl-v5
+  experiment_name: dr_gspo_dpg_eta2_edge_v5
+  default_local_dir: results/gsm_infinity_rl_v5/dr_gspo_dpg_eta2_edge_v5
+  n_gpus_per_node: 8
+  nnodes: 1
+  save_freq: 10
+  test_freq: -1
+  log_val_generations: 100
+  total_epochs: 2
