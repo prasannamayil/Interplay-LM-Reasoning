@@ -45,6 +45,7 @@ class PolicyLossConfig(BaseConfig):
         ppo_kl_coef (float): KL divergence penalty coefficient.
         use_is_weighted_cov (bool): If True, compute covariance using IS-weighted advantages.
         dpg_eta (float): Temperature for the Delightful Policy Gradient sigmoid gate (default 1.0).
+        dpg_diagnostics_only (bool): If True, compute DPG diagnostics without applying the gate (for baselines).
         ent_cov_alpha (float): Strength multiplier for Ent-Cov shaping (0.0 to 1.0).
         ent_cov_alpha_end (float): Final alpha value for scheduled decay (None means constant).
         ent_cov_alpha_schedule (str): Schedule type for alpha: "constant", "linear", "cosine".
@@ -64,6 +65,7 @@ class PolicyLossConfig(BaseConfig):
     use_is_weighted_cov: bool = False
     # Delightful Policy Gradient parameters
     dpg_eta: float = 1.0
+    dpg_diagnostics_only: bool = False
     # Ent-Cov parameters
     ent_cov_alpha: float = 1.0
     ent_cov_alpha_end: Optional[float] = None

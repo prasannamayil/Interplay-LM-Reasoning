@@ -1302,6 +1302,11 @@ def compute_policy_loss_vanilla(
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
+    if getattr(getattr(config, "policy_loss", None), "dpg_diagnostics_only", False):
+        dpg_eta = getattr(config.policy_loss, "dpg_eta", 1.0)
+        extra = _compute_dpg_diagnostics_token(log_prob, advantages, response_mask, dpg_eta)
+        return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra
+
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
@@ -1367,6 +1372,11 @@ def compute_policy_loss_gspo(
     pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
 
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    if getattr(getattr(config, "policy_loss", None), "dpg_diagnostics_only", False):
+        dpg_eta = getattr(config.policy_loss, "dpg_eta", 1.0)
+        extra = _compute_dpg_diagnostics_seq(log_prob, advantages, response_mask, seq_lengths, dpg_eta)
+        return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
@@ -2172,6 +2182,93 @@ def compute_policy_loss_gspo_kl_cov(
     return pg_loss, torch.tensor(0.0, device=pg_loss.device), ppo_kl_abs, torch.tensor(0.0, device=pg_loss.device)
 
 
+def _compute_dpg_diagnostics_token(
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    eta: float,
+) -> dict[str, float]:
+    """Compute DPG gate diagnostics at the token level (shared by dpg and vanilla+diag)."""
+    surprisal = -log_prob.detach()
+    delight = advantages.detach() * surprisal
+    gate = torch.sigmoid(delight / eta)
+
+    mask_bool = response_mask.bool()
+    g = gate[mask_bool]
+    d = delight[mask_bool]
+    s = surprisal[mask_bool]
+    adv = advantages.detach()[mask_bool]
+
+    pos_adv = adv > 0
+    neg_adv = adv < 0
+
+    return {
+        "dpg/gate_mean": g.mean().item(),
+        "dpg/gate_std": g.std().item(),
+        "dpg/gate_min": g.min().item(),
+        "dpg/gate_max": g.max().item(),
+        "dpg/gate_p10": g.quantile(0.1).item(),
+        "dpg/gate_p50": g.quantile(0.5).item(),
+        "dpg/gate_p90": g.quantile(0.9).item(),
+        "dpg/delight_mean": d.mean().item(),
+        "dpg/delight_std": d.std().item(),
+        "dpg/delight_pos_adv_mean": d[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/delight_neg_adv_mean": d[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/surprisal_mean": s.mean().item(),
+        "dpg/surprisal_std": s.std().item(),
+        "dpg/surprisal_pos_adv_mean": s[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/surprisal_neg_adv_mean": s[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/breakthrough_frac": (g > 0.9).float().mean().item(),
+        "dpg/blunder_frac": (g < 0.1).float().mean().item(),
+        "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/gate_mean_neg_adv": g[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/effective_coeff_mean": (g * adv).mean().item(),
+    }
+
+
+def _compute_dpg_diagnostics_seq(
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    seq_lengths: torch.Tensor,
+    eta: float,
+) -> dict[str, float]:
+    """Compute DPG gate diagnostics at the sequence level (shared by gspo_dpg and gspo+diag)."""
+    surprisal_seq = torch.sum(-log_prob.detach() * response_mask, dim=-1) / seq_lengths
+    adv_seq = torch.sum(advantages.detach() * response_mask, dim=-1) / seq_lengths
+    delight_seq = adv_seq * surprisal_seq
+    gate_seq = torch.sigmoid(delight_seq / eta)
+
+    g = gate_seq
+    d = delight_seq
+    s = surprisal_seq
+    pos_adv = adv_seq > 0
+    neg_adv = adv_seq < 0
+
+    return {
+        "dpg/gate_mean": g.mean().item(),
+        "dpg/gate_std": g.std().item(),
+        "dpg/gate_min": g.min().item(),
+        "dpg/gate_max": g.max().item(),
+        "dpg/gate_p10": g.quantile(0.1).item(),
+        "dpg/gate_p50": g.quantile(0.5).item(),
+        "dpg/gate_p90": g.quantile(0.9).item(),
+        "dpg/delight_mean": d.mean().item(),
+        "dpg/delight_std": d.std().item(),
+        "dpg/delight_pos_adv_mean": d[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/delight_neg_adv_mean": d[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/surprisal_mean": s.mean().item(),
+        "dpg/surprisal_std": s.std().item(),
+        "dpg/surprisal_pos_adv_mean": s[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/surprisal_neg_adv_mean": s[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/breakthrough_frac": (g > 0.9).float().mean().item(),
+        "dpg/blunder_frac": (g < 0.1).float().mean().item(),
+        "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/gate_mean_neg_adv": g[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/effective_coeff_mean": (g * adv_seq).mean().item(),
+    }
+
+
 @register_policy_loss("dpg")
 def compute_policy_loss_dpg(
     old_log_prob: torch.Tensor,
@@ -2228,41 +2325,7 @@ def compute_policy_loss_dpg(
     pg_losses = gate * pg_losses
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-    # --- DPG metrics (token-level) ---
-    mask_bool = response_mask.bool()
-    g = gate[mask_bool]
-    d = delight[mask_bool]
-    s = surprisal[mask_bool]
-    adv = advantages.detach()[mask_bool]
-
-    pos_adv = adv > 0
-    neg_adv = adv < 0
-    breakthrough = g > 0.9
-    blunder = g < 0.1
-
-    extra = {
-        "dpg/gate_mean": g.mean().item(),
-        "dpg/gate_std": g.std().item(),
-        "dpg/gate_min": g.min().item(),
-        "dpg/gate_max": g.max().item(),
-        "dpg/gate_p10": g.quantile(0.1).item(),
-        "dpg/gate_p50": g.quantile(0.5).item(),
-        "dpg/gate_p90": g.quantile(0.9).item(),
-        "dpg/delight_mean": d.mean().item(),
-        "dpg/delight_std": d.std().item(),
-        "dpg/delight_pos_adv_mean": d[pos_adv].mean().item() if pos_adv.any() else 0.0,
-        "dpg/delight_neg_adv_mean": d[neg_adv].mean().item() if neg_adv.any() else 0.0,
-        "dpg/surprisal_mean": s.mean().item(),
-        "dpg/surprisal_std": s.std().item(),
-        "dpg/surprisal_pos_adv_mean": s[pos_adv].mean().item() if pos_adv.any() else 0.0,
-        "dpg/surprisal_neg_adv_mean": s[neg_adv].mean().item() if neg_adv.any() else 0.0,
-        "dpg/breakthrough_frac": breakthrough.float().mean().item(),
-        "dpg/blunder_frac": blunder.float().mean().item(),
-        "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
-        "dpg/gate_mean_neg_adv": g[neg_adv].mean().item() if neg_adv.any() else 0.0,
-        "dpg/effective_coeff_mean": (g * adv).mean().item(),
-    }
+    extra = _compute_dpg_diagnostics_token(log_prob, advantages, response_mask, dpg_eta)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra
 
@@ -2319,38 +2382,7 @@ def compute_policy_loss_gspo_dpg(
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
     pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
-
-    # --- DPG metrics (sequence-level) ---
-    g = gate_seq
-    d = delight_seq
-    s = surprisal_seq
-    pos_adv = adv_seq > 0
-    neg_adv = adv_seq < 0
-    breakthrough = g > 0.9
-    blunder = g < 0.1
-
-    extra = {
-        "dpg/gate_mean": g.mean().item(),
-        "dpg/gate_std": g.std().item(),
-        "dpg/gate_min": g.min().item(),
-        "dpg/gate_max": g.max().item(),
-        "dpg/gate_p10": g.quantile(0.1).item(),
-        "dpg/gate_p50": g.quantile(0.5).item(),
-        "dpg/gate_p90": g.quantile(0.9).item(),
-        "dpg/delight_mean": d.mean().item(),
-        "dpg/delight_std": d.std().item(),
-        "dpg/delight_pos_adv_mean": d[pos_adv].mean().item() if pos_adv.any() else 0.0,
-        "dpg/delight_neg_adv_mean": d[neg_adv].mean().item() if neg_adv.any() else 0.0,
-        "dpg/surprisal_mean": s.mean().item(),
-        "dpg/surprisal_std": s.std().item(),
-        "dpg/surprisal_pos_adv_mean": s[pos_adv].mean().item() if pos_adv.any() else 0.0,
-        "dpg/surprisal_neg_adv_mean": s[neg_adv].mean().item() if neg_adv.any() else 0.0,
-        "dpg/breakthrough_frac": breakthrough.float().mean().item(),
-        "dpg/blunder_frac": blunder.float().mean().item(),
-        "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
-        "dpg/gate_mean_neg_adv": g[neg_adv].mean().item() if neg_adv.any() else 0.0,
-        "dpg/effective_coeff_mean": (g * adv_seq).mean().item(),
-    }
+    extra = _compute_dpg_diagnostics_seq(log_prob, advantages, response_mask, seq_lengths, dpg_eta)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, extra
 
