@@ -2238,7 +2238,6 @@ def compute_policy_loss_dpg(
 
     pos_adv = adv > 0
     neg_adv = adv < 0
-    # Thresholds for breakthrough / blunder classification
     breakthrough = g > 0.9
     blunder = g < 0.1
 
@@ -2247,9 +2246,17 @@ def compute_policy_loss_dpg(
         "dpg/gate_std": g.std().item(),
         "dpg/gate_min": g.min().item(),
         "dpg/gate_max": g.max().item(),
+        "dpg/gate_p10": g.quantile(0.1).item(),
+        "dpg/gate_p50": g.quantile(0.5).item(),
+        "dpg/gate_p90": g.quantile(0.9).item(),
         "dpg/delight_mean": d.mean().item(),
         "dpg/delight_std": d.std().item(),
+        "dpg/delight_pos_adv_mean": d[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/delight_neg_adv_mean": d[neg_adv].mean().item() if neg_adv.any() else 0.0,
         "dpg/surprisal_mean": s.mean().item(),
+        "dpg/surprisal_std": s.std().item(),
+        "dpg/surprisal_pos_adv_mean": s[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/surprisal_neg_adv_mean": s[neg_adv].mean().item() if neg_adv.any() else 0.0,
         "dpg/breakthrough_frac": breakthrough.float().mean().item(),
         "dpg/blunder_frac": blunder.float().mean().item(),
         "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
@@ -2315,6 +2322,8 @@ def compute_policy_loss_gspo_dpg(
 
     # --- DPG metrics (sequence-level) ---
     g = gate_seq
+    d = delight_seq
+    s = surprisal_seq
     pos_adv = adv_seq > 0
     neg_adv = adv_seq < 0
     breakthrough = g > 0.9
@@ -2325,9 +2334,17 @@ def compute_policy_loss_gspo_dpg(
         "dpg/gate_std": g.std().item(),
         "dpg/gate_min": g.min().item(),
         "dpg/gate_max": g.max().item(),
-        "dpg/delight_mean": delight_seq.mean().item(),
-        "dpg/delight_std": delight_seq.std().item(),
-        "dpg/surprisal_seq_mean": surprisal_seq.mean().item(),
+        "dpg/gate_p10": g.quantile(0.1).item(),
+        "dpg/gate_p50": g.quantile(0.5).item(),
+        "dpg/gate_p90": g.quantile(0.9).item(),
+        "dpg/delight_mean": d.mean().item(),
+        "dpg/delight_std": d.std().item(),
+        "dpg/delight_pos_adv_mean": d[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/delight_neg_adv_mean": d[neg_adv].mean().item() if neg_adv.any() else 0.0,
+        "dpg/surprisal_mean": s.mean().item(),
+        "dpg/surprisal_std": s.std().item(),
+        "dpg/surprisal_pos_adv_mean": s[pos_adv].mean().item() if pos_adv.any() else 0.0,
+        "dpg/surprisal_neg_adv_mean": s[neg_adv].mean().item() if neg_adv.any() else 0.0,
         "dpg/breakthrough_frac": breakthrough.float().mean().item(),
         "dpg/blunder_frac": blunder.float().mean().item(),
         "dpg/gate_mean_pos_adv": g[pos_adv].mean().item() if pos_adv.any() else 0.0,
