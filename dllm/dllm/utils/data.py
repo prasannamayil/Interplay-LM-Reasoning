@@ -50,7 +50,7 @@ def tokenize_and_group(
     # --- optionally append EOS to each sample ---
     if insert_eos:
         eos_id = getattr(tokenizer, "eos_token_id")
-        assert eos_id
+        assert eos_id is not None, "tokenizer has no eos_token_id"
         # append EOS only if the sample doesn't already end with it
         ids = [seq + ([] if (seq and seq[-1] == eos_id) else [eos_id]) for seq in ids]
     # ----------------------------------------------------------------
@@ -105,7 +105,7 @@ def tokenize_individual(
 
     if insert_eos:
         eos_id = getattr(tokenizer, "eos_token_id")
-        assert eos_id
+        assert eos_id is not None, "tokenizer has no eos_token_id"
         ids = [
             (seq[: seq_length - 1] + [eos_id])
             if (len(seq) >= seq_length or not seq or seq[-1] != eos_id)
