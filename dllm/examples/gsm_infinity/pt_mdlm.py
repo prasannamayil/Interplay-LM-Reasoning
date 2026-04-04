@@ -381,10 +381,21 @@ def train():
     dllm.utils.initial_training_setup(model_args, data_args, training_args)
 
     # ----- Model ------------------------------------------------------------------
-    # Initialize model weights from scratch using the A2D config
     config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
-    with dllm.utils.init_device_context_manager():
-        model = transformers.AutoModel.from_config(config, torch_dtype=torch.bfloat16)
+
+    has_weights = any(
+        os.path.exists(os.path.join(model_args.model_name_or_path, f))
+        for f in ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json")
+    )
+    if has_weights:
+        logger.info(f"Loading pretrained weights from {model_args.model_name_or_path}")
+        model = transformers.AutoModel.from_pretrained(
+            model_args.model_name_or_path, config=config, torch_dtype=torch.bfloat16,
+        )
+    else:
+        logger.info("No pretrained weights found — initializing from scratch")
+        with dllm.utils.init_device_context_manager():
+            model = transformers.AutoModel.from_config(config, torch_dtype=torch.bfloat16)
 
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
