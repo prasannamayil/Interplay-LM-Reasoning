@@ -19,7 +19,7 @@ DLLM_ROOT="${PROJECT_ROOT}/dllm"
 VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
 
 DATASET_PATH="${PROJECT_ROOT}/data/composition_hf_dllm_10B_nopack_pythia"
-MODEL="EleutherAI/pythia-2.8b"
+MODEL="${PROJECT_ROOT}/.models/pretrained/pythia-2.8b"
 OUTPUT_DIR="${PROJECT_ROOT}/results/gsm_infinity_ft/pythia-2.8b-ar"
 
 export HF_HOME="${PROJECT_ROOT}/.hf_cache"
