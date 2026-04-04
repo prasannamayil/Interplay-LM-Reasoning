@@ -100,48 +100,30 @@ print(f'  mask_token_id={config[\"mask_token_id\"]}')
 fi
 
 # =========================================================================
-# Step 3: Tokenize ~10B GSM-Infinity data with Pythia tokenizer (no-pack)
+# Step 3: Tokenize 10B GSM-Infinity data with Pythia tokenizer (no-pack)
 #
-# Uses preprocess_data.py (fast multiprocessing Pool with raw file I/O)
-# instead of precache_data.py (slow HuggingFace dataset.map). This
-# processes all shards in parallel — ~15 min vs ~5 hours.
-#
-# To limit to ~10B tokens (1 shard per op), we create a temp directory
-# with symlinks to only the first shard of each op.
+# Uses the same precache_data.py that generated composition_hf_dllm_10B_nopack
+# (Qwen2) in ~15 min. Same budget logic, same distribution across ops.
+# Pythia tokenizer is slower (50K BPE vs 2K Qwen2) so expect ~30-45 min.
 # =========================================================================
 if [[ -f "${OUTPUT_DIR}/dataset_dict.json" ]]; then
     echo "[Step 3] Tokenized dataset already exists at ${OUTPUT_DIR}"
 else
-    echo "[Step 3] Tokenizing ~10B GSM-Infinity data (no-pack, fast path)..."
+    echo "[Step 3] Tokenizing ${TOKEN_BUDGET} GSM-Infinity data (no-pack)..."
     echo "  Tokenizer: ${TOKENIZER_PATH}"
     echo "  Output:    ${OUTPUT_DIR}"
 
-    # Create temp directory with 1 shard per op (~1B tokens each = ~9B total)
-    FILTERED_DIR=$(mktemp -d "${PROJECT_ROOT}/data/.filtered_10B_XXXXXX")
-    trap "rm -rf ${FILTERED_DIR}" EXIT
-    for op in $(seq 2 10); do
-        mkdir -p "${FILTERED_DIR}/${op}"
-        first_shard=$(ls "${RAW_DATA_DIR}/${op}/"*.jsonl 2>/dev/null | head -1)
-        if [[ -n "${first_shard}" ]]; then
-            ln -s "${first_shard}" "${FILTERED_DIR}/${op}/$(basename "${first_shard}")"
-        fi
-    done
-    echo "  Filtered data dir: ${FILTERED_DIR} (1 shard per op, ~9B tokens)"
-
     cd "${DLLM_ROOT}"
 
-    python examples/gsm_infinity/preprocess_data.py \
-        --data_dir "${FILTERED_DIR}" \
+    python examples/gsm_infinity/precache_data.py \
+        --raw_data_dir "${RAW_DATA_DIR}" \
         --tokenizer_path "${TOKENIZER_PATH}" \
         --output_dir "${OUTPUT_DIR}" \
+        --token_budget "${TOKEN_BUDGET}" \
         --op_min 2 --op_max 10 \
         --seq_length 2048 \
-        --num_workers 16 \
-        --num_save_proc 16 \
+        --num_proc 32 \
         --no_pack
-
-    rm -rf "${FILTERED_DIR}"
-    trap - EXIT
 
     echo "[Step 3] Done."
 fi
