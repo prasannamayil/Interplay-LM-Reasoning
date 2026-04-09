@@ -255,8 +255,10 @@ class SolutionParser:
     """Parse gsm-infinite style solutions into dependency graphs."""
 
     def __init__(self) -> None:
-        # Maps variable -> parameter name for already processed steps
-        self.var_to_param: Dict[str, str] = {}
+        # Maps variable -> all parameter names that have used this variable letter.
+        # When variables are reused (e.g. diffusion models collapsing all vars to 't'),
+        # every prior parameter name is retained so dependency resolution still works.
+        self.var_to_params: Dict[str, List[str]] = {}
         # Numeric value known for variables (parameter or intermediate)
         self.variable_values: Dict[str, float] = {}
 
@@ -265,7 +267,7 @@ class SolutionParser:
         cleaned = TAG_RE.sub("", raw_solution)
         cleaned = cleaned.strip()
         # Reset parser state for each new solution
-        self.var_to_param = {}
+        self.var_to_params = {}
         self.variable_values = {}
         preamble, body = self._split_preamble(cleaned)
 
@@ -330,12 +332,32 @@ class SolutionParser:
         intermediate_deps: Dict[str, Set[str]] = {}
         intermediate_values: Dict[str, float] = {}
         last_value: Optional[float] = None
+        unresolved_letters: Set[str] = set()
 
         for match in ASSIGNMENT_RE.finditer(step.raw_body):
             target_var = match.group(1)
             expr = match.group(2).strip()
             expr_eval = expr.split("=")[-1].strip()
+
+            # Record sub-assignments within the expression (e.g. "s = 3"
+            # inside "t = s = 3") so phantom variables get values stored.
+            for sub_var, sub_val in re.findall(
+                r"([A-Za-z])\s*=\s*([-+]?\d+(?:\.\d+)?)", expr
+            ):
+                if sub_var != target_var:
+                    try:
+                        intermediate_values[sub_var] = float(sub_val)
+                        self.variable_values[sub_var] = float(sub_val)
+                    except ValueError:
+                        pass
+
             source_deps = self._collect_dependencies(expr, intermediate_deps)
+
+            for letter in re.findall(r"[A-Za-z]", expr):
+                if (letter not in self.var_to_params
+                        and letter not in intermediate_deps
+                        and letter != current_var):
+                    unresolved_letters.add(letter)
 
             if target_var == current_var:
                 step.dependencies.update(source_deps)
@@ -358,12 +380,55 @@ class SolutionParser:
                     if target_var == current_var:
                         last_value = fallback_value
 
+        # Propagate all intermediate dependencies to the step.
+        # In equation-style solutions, intermediate variables (k, i, r, etc.)
+        # accumulate dependencies on prior steps (e.g. via references to x)
+        # but never get merged into step.dependencies because they aren't the
+        # step's main variable. Collect them all here.
+        for _int_var, _int_deps in intermediate_deps.items():
+            step.dependencies.update(_int_deps)
+
+        # Second pass: resolve phantom variables via value matching.
+        # Diffusion models may generate random single-letter variables that
+        # aren't defined anywhere but whose assigned value matches a prior
+        # step's output. Treat these as references to those prior steps.
+        if unresolved_letters:
+            for letter in unresolved_letters:
+                val = intermediate_values.get(letter) or self.variable_values.get(letter)
+                if val is None:
+                    continue
+                for var, params in self.var_to_params.items():
+                    if var in self.variable_values and abs(self.variable_values[var] - val) < 1e-9:
+                        step.dependencies.update(params)
+
+        # For equation-style steps where the current_var never appears on the
+        # LHS of an assignment (because the model uses phantom letters), extract
+        # the value from "We know <phantom> = N" patterns in the raw body.
+        if last_value is None:
+            we_know = re.search(
+                r"[Ww]e\s+know\s+[A-Za-z]\s*=\s*([-+]?\d+(?:\.\d+)?)",
+                step.raw_body,
+            )
+            if we_know:
+                try:
+                    last_value = float(we_know.group(1))
+                except ValueError:
+                    pass
+
+        # If current_var still has no value, inherit from the last intermediate
+        # that was assigned. Handles cases like "Define X as c; so W = x = x"
+        # where c (current_var) never appears but W gets the value.
+        if last_value is None and intermediate_values:
+            last_value = list(intermediate_values.values())[-1]
+
         if last_value is None:
             last_value = self._extract_last_number(step.raw_body)
             if last_value is not None:
                 self.variable_values[current_var] = last_value
+        if last_value is not None:
+            self.variable_values[current_var] = last_value
         step.value = last_value
-        self.var_to_param[current_var] = step.parameter_name
+        self.var_to_params.setdefault(current_var, []).append(step.parameter_name)
 
     def _collect_dependencies(
         self,
@@ -372,8 +437,16 @@ class SolutionParser:
     ) -> Set[str]:
         deps: Set[str] = set()
         for token in re.findall(r"[A-Za-z]", expr):
-            if token in self.var_to_param:
-                deps.add(self.var_to_param[token])
+            if token in self.var_to_params:
+                deps.update(self.var_to_params[token])
+            elif token in self.variable_values:
+                # Phantom variable: letter not in var_to_params but has a known
+                # numeric value (assigned as an intermediate in a prior step).
+                # Resolve by finding which parameter(s) produced that value.
+                val = self.variable_values[token]
+                for var, params in self.var_to_params.items():
+                    if var in self.variable_values and abs(self.variable_values[var] - val) < 1e-9:
+                        deps.update(params)
             if token in intermediate_deps:
                 deps.update(intermediate_deps[token])
         return deps

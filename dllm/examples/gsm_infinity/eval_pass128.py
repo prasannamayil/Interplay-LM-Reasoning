@@ -240,6 +240,7 @@ def evaluate(
     temperature: float = 0.0,
     op_levels: list[int] | None = None,
     device: str = "cuda",
+    save_generations: bool = False,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -322,15 +323,14 @@ def evaluate(
             # Tokenize prompt
             prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
 
-            # Generate n_samples completions in micro-batches
             all_correct = []
+            all_generated_texts = [] if save_generations else None
             eos_id = getattr(tokenizer, "eos_token_id", None)
             if eos_id is None and hasattr(tokenizer, "convert_tokens_to_ids"):
                 _eos = tokenizer.convert_tokens_to_ids("</answer>")
                 if _eos != tokenizer.unk_token_id:
                     eos_id = _eos
             if is_ar:
-                # AR: standard causal LM generation
                 for batch_start in range(0, n_samples, batch_size):
                     cur_batch_size = min(batch_size, n_samples - batch_start)
                     batch_prompts = [prompt_text] * cur_batch_size
@@ -364,8 +364,9 @@ def evaluate(
                         generated_text = tokenizer.decode(new_ids, skip_special_tokens=False)
                         correct = check_process_and_outcome(generated_text, example)
                         all_correct.append(correct)
+                        if save_generations:
+                            all_generated_texts.append(generated_text)
             else:
-                # DLLM: diffusion sampler
                 for batch_start in range(0, n_samples, batch_size):
                     batch_end = min(batch_start + batch_size, n_samples)
                     cur_batch_size = batch_end - batch_start
@@ -387,20 +388,22 @@ def evaluate(
                         generated_text = tokenizer.decode(gen_ids, skip_special_tokens=False)
                         correct = check_process_and_outcome(generated_text, example)
                         all_correct.append(correct)
+                        if save_generations:
+                            all_generated_texts.append(generated_text)
 
             n_correct = sum(all_correct)
             op_successes.append((n_samples, n_correct))
 
-            # Log first few examples with details
-            if ex_idx < 3:
-                op_details.append({
-                    "prompt": prompt_text[:200],
-                    "gold_answer": gold_answer,
-                    "n_correct": n_correct,
-                    "n_samples": n_samples,
-                })
+            detail_entry = {
+                "prompt": prompt_text,
+                "gold_answer": gold_answer,
+                "n_correct": n_correct,
+                "n_samples": n_samples,
+            }
+            if save_generations:
+                detail_entry["generations"] = all_generated_texts
+            op_details.append(detail_entry)
 
-        # Compute pass@k for this op level
         op_metrics = {}
         for k in k_values:
             pass_k_values = [
@@ -507,6 +510,10 @@ def main():
         "--device", type=str, default="cuda",
         help="Device to use (default: cuda)",
     )
+    parser.add_argument(
+        "--save_generations", action="store_true", default=False,
+        help="Save generated text in detail files (for debugging)",
+    )
 
     args = parser.parse_args()
 
@@ -528,6 +535,7 @@ def main():
         temperature=args.temperature,
         op_levels=op_levels,
         device=args.device,
+        save_generations=args.save_generations,
     )
 
 
