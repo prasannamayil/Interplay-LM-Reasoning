@@ -113,7 +113,7 @@ def train():
                     tokenizer,
                     return_tensors="pt",
                     padding=True,
-                    label_pad_token_id=tokenizer.pad_token_id,  # finetune on padded <eos_token>
+                    label_pad_token_id=-100,
                 ),
             )
         ),

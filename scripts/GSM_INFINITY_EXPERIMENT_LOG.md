@@ -111,6 +111,32 @@ Added `weight_decay=0.1`, `max_grad_norm=1.0` to AR script.
 
 Heredoc Python used `sys.argv` but heredocs don't pass args. Fixed with `os.environ`.
 
+### Bug 6: Synthetic EOS Padding Supervised in Diffusion Loss
+
+**Impact**: ~67-71% of supervised token positions in each batch were synthetic EOS padding rather than real reasoning tokens. Reported training loss was artificially low and not comparable to AR CE. Gradient budget was dominated by easy EOS prediction instead of solution/answer tokens.
+
+**Root cause**: Two independent sources of synthetic EOS in `labels`:
+
+1. **Batch padding**: `DataCollatorForSeq2Seq` was configured with `label_pad_token_id=tokenizer.pad_token_id` in GSM scripts (`pt_bd3lm.py`, `pt_mdlm.py`) and all dLLM SFT recipes (`a2d/mdlm/sft.py`, `llada/sft.py`, `bert/sft.py`, `dream/sft.py`). With no-pack variable-length data (avg 317 tokens, batch padded to longest), this made the majority of supervised positions synthetic EOS.
+
+2. **BD3LM block alignment**: `AppendEOSBlockWrapper` padded both `input_ids` and `labels` with `eos_token_id` to reach a multiple of `block_size`. These tail positions entered `maskable_mask = labels != -100` and contributed to diffusion loss.
+
+The real EOS at the end of each example (from `insert_eos=True` during tokenization) was never affected — it remains supervised so the model still learns to stop.
+
+**Fix** (commit `6dc95c1` + follow-up):
+
+- `dllm/dllm/core/trainers/bd3lm.py`: `AppendEOSBlockWrapper` now pads `labels` with `-100` instead of `eos_token_id`.
+- `dllm/examples/gsm_infinity/pt_bd3lm.py`: `label_pad_token_id=-100`.
+- `dllm/examples/gsm_infinity/pt_mdlm.py`: `label_pad_token_id=-100`.
+- `dllm/examples/a2d/mdlm/sft.py`: `label_pad_token_id=-100`.
+- `dllm/examples/llada/sft.py`: `label_pad_token_id=-100`.
+- `dllm/examples/bert/sft.py`: `label_pad_token_id=-100`.
+- `dllm/examples/dream/sft.py`: `label_pad_token_id=-100`.
+
+No trainer changes needed — `BD3LMTrainer` and `MDLMTrainer` already gate all masking, loss computation, and normalization through `maskable_mask = labels != -100`.
+
+**Note on Bug 3 vs Bug 6**: Bug 3 was the *opposite* problem from an earlier iteration: GSM scripts originally used `-100` for padding, which meant the model never learned to stop generating. The fix at that time was to switch to `pad_token_id`. Bug 6 recognizes that fix overshot: supervising *all* padding is too much with no-pack variable-length data. The correct middle ground (now implemented) is to keep the single real EOS trainable while ignoring synthetic batch/block padding in labels.
+
 ---
 
 ## Results
@@ -522,7 +548,7 @@ The fundamental issue is that process+outcome drops sharply after op=10 for BD3L
 
 5. **Progressive block-size schedule (LLaDA 2.0 style).** Use a coarse-to-fine schedule at inference: first denoise the full solution with large blocks to get the global structure (step count, entity names, answer magnitude), then refine with smaller blocks for local symbolic consistency (variable letters, cross-references). This directly addresses the observed failure mode: the model gets the computation right globally but fails at local token coordination. Can be applied at eval time without retraining (multi-pass with decreasing block_size). During training, anneal block_size from small to large as a curriculum.
 
-6. **Mask synthetic EOS padding in diffusion loss.** Keep the first real EOS trainable, but set `labels=-100` for dynamic batch padding and BD3LM block-alignment tails (`AppendEOSBlockWrapper`). The current GSM finetuning setup follows SFT-style `label_pad_token_id=pad_token_id`, which likely makes a majority of supervised diffusion positions synthetic EOS rather than reasoning tokens. This depresses the reported loss and spends gradient budget on easy stopping behavior. Validate with a short A/B run and compare pass@1, pass@128, EOS-stop rate, and generation length.
+6. **~~Mask synthetic EOS padding in diffusion loss.~~** DONE (Bug 6). Fixed repo-wide: `AppendEOSBlockWrapper` pads labels with `-100`; all GSM and SFT collators use `label_pad_token_id=-100`. The single real EOS per example remains supervised. All existing 410M checkpoints were trained with the old (supervised padding) setup; new runs will use the fix. Expect higher reported loss (more meaningful) and better gradient allocation to reasoning tokens.
 
 7. **Pack the data.** No-pack wastes ~84% of each sequence on padding (avg 317 / max 2048). Packing gives ~6x throughput, enabling 2 epochs in the time of 1/3 epoch. The MDLM trainer already supports packing. For BD3LM, requires modifying the block-diagonal attention mask to handle packed sequence boundaries -- non-trivial but high payoff for training efficiency.
 

@@ -147,7 +147,7 @@ def train():
             padding=True,
             perbatch_cutoff=data_args.perbatch_cutoff,
             resp_cutoff_ratio=data_args.resp_cutoff_ratio,
-            label_pad_token_id=tokenizer.pad_token_id,  # finetune on padded <eos_token>
+            label_pad_token_id=-100,
         ),
     )
     trainer.train()
