@@ -42,6 +42,41 @@ The Qwen2 from-scratch models used **packed** data (seq_length=2048, every seque
 
 The Qwen2 models saw ~10B tokens in 10K steps. Pythia sees only ~1.6B in 10K steps — **6x less data for the same step count**. This partly explains why early Pythia finetuning results were poor.
 
+### Padding-Supervision Confounder (No-Pack + EOS Labels)
+
+Current GSM diffusion finetuning uses `label_pad_token_id=tokenizer.pad_token_id` in `dllm/examples/gsm_infinity/pt_mdlm.py` and `dllm/examples/gsm_infinity/pt_bd3lm.py`, following the repo's SFT recipes rather than the default dLLM pretraining collator behavior. Because GSM uses no-pack variable-length sequences, dynamic batching turns a large fraction of each batch into synthetic EOS-labeled positions. BD3LM then adds another EOS-only tail via `AppendEOSBlockWrapper`, which pads each example to a multiple of `block_size`.
+
+A quick 10K-example sample of `composition_hf_dllm_10B_nopack_pythia_masked` suggests the effect is large:
+
+- **~150** real trainable tokens/example (solution + answer)
+- **~15** extra EOS labels/example from BD3LM block-size padding
+- **~300-360** extra EOS labels/example from batch padding
+- Estimated synthetic supervised fraction: **~67%** for MDLM (batch=32) and **~71%** for BD3LM-bs32 (batch=64)
+
+Consequences:
+
+- Reported diffusion training loss is artificially low and not comparable to AR CE.
+- A substantial fraction of gradient budget goes to easy EOS prediction / stopping behavior instead of reasoning tokens.
+- Eval is still honest in the sense that `eval_pass128.py` truncates generations at the first EOS before scoring, so the main effect is on training efficiency and loss interpretation, not on the correctness checker itself.
+
+This is nuanced rather than a simple bug. The repo's dLLM SFT recipes (`examples/llada/sft.py`, `examples/a2d/mdlm/sft.py`, etc.) also train on padded EOS to teach stopping, while several dLLM pretraining recipes (`examples/fineweb/pt_mdlm.py`, `examples/a2d/mdlm/pt.py`, etc.) use the default HF behavior and ignore batch padding labels with `-100`. A cleaner GSM setup may be to keep the first real EOS trainable while masking synthetic batch-padding and block-alignment tails in `labels`. This also matches common advice in external LM finetuning discussions: keep the semantically meaningful first EOS, mask the padding-like extra EOS tokens.
+
+#### Repo-wide Padding Supervision Summary
+
+The issue is not uniform across the codebase. Different training recipes supervise different kinds of EOS/padding:
+
+| Area / script family | Entry point(s) | Batch padding in `labels` | Extra EOS tails | Notes |
+| -------------------- | -------------- | ------------------------- | --------------- | ----- |
+| AR finetune | `scripts/finetune/finetune_pythia.py`, `scripts/finetune/finetune_mamba.py` | **Ignored** (default HF `DataCollatorForSeq2Seq`, label pad = `-100`) | None | Cleanest / standard AR setup |
+| Diffusion finetune (MDLM) | `scripts/finetune/run_finetune_mdlm.sh` -> `dllm/examples/a2d/mdlm/sft.py` | **Supervised** (`label_pad_token_id=tokenizer.pad_token_id`) | None | SFT-style "learn padded EOS" |
+| Diffusion finetune (BD3LM) | `scripts/finetune/run_finetune_bd3lm.sh` -> `dllm/examples/a2d/bd3lm/sft.py` | **Ignored** (default HF collator) | **Yes** via `AppendEOSBlockWrapper` | Milder issue: block-alignment tails only |
+| Diffusion pretrain (MDLM) | `dllm/examples/fineweb/pt_mdlm.py`, `dllm/examples/a2d/mdlm/pt.py` | **Ignored** (default HF collator) | None | Default dLLM pretraining behavior |
+| Diffusion pretrain (BD3LM) | `dllm/examples/fineweb/pt_bd3lm.py` | **Ignored** (default HF collator) | **Yes** via `AppendEOSBlockWrapper` | Same mild BD3LM pattern as above |
+| GSM finetune (MDLM) | `dllm/examples/gsm_infinity/pt_mdlm.py` | **Supervised** (`label_pad_token_id=tokenizer.pad_token_id`) | None | Stronger no-pack confounder |
+| GSM finetune (BD3LM) | `dllm/examples/gsm_infinity/pt_bd3lm.py` | **Supervised** (`label_pad_token_id=tokenizer.pad_token_id`) | **Yes** via `AppendEOSBlockWrapper` | Strongest case: batch padding + block tails |
+
+So the answer to "does BD3LM always have this issue?" is: **BD3LM almost always supervises some EOS tail because of block alignment, but only some runs (especially GSM no-pack finetuning) also supervise a large amount of synthetic batch-padding EOS.** The latter is the more serious confounder.
+
 ### Test Data
 
 - `data/composition_hf/test_small/`: 19 ops (2-20), 200 examples each = 3,800 total
@@ -487,23 +522,25 @@ The fundamental issue is that process+outcome drops sharply after op=10 for BD3L
 
 5. **Progressive block-size schedule (LLaDA 2.0 style).** Use a coarse-to-fine schedule at inference: first denoise the full solution with large blocks to get the global structure (step count, entity names, answer magnitude), then refine with smaller blocks for local symbolic consistency (variable letters, cross-references). This directly addresses the observed failure mode: the model gets the computation right globally but fails at local token coordination. Can be applied at eval time without retraining (multi-pass with decreasing block_size). During training, anneal block_size from small to large as a curriculum.
 
-6. **Pack the data.** No-pack wastes ~84% of each sequence on padding (avg 317 / max 2048). Packing gives ~6x throughput, enabling 2 epochs in the time of 1/3 epoch. The MDLM trainer already supports packing. For BD3LM, requires modifying the block-diagonal attention mask to handle packed sequence boundaries -- non-trivial but high payoff for training efficiency.
+6. **Mask synthetic EOS padding in diffusion loss.** Keep the first real EOS trainable, but set `labels=-100` for dynamic batch padding and BD3LM block-alignment tails (`AppendEOSBlockWrapper`). The current GSM finetuning setup follows SFT-style `label_pad_token_id=pad_token_id`, which likely makes a majority of supervised diffusion positions synthetic EOS rather than reasoning tokens. This depresses the reported loss and spends gradient budget on easy stopping behavior. Validate with a short A/B run and compare pass@1, pass@128, EOS-stop rate, and generation length.
 
-7. **Constrained decoding for variable names.** At each "Define ... as X" position, constrain the sampler to output a variable letter not yet used. This surgically fixes the variable-collapse problem without changing the model or training. Implementation: track assigned variables during block-by-block generation, mask logits at variable-assignment positions. Only works for BD3LM (has left-to-right block structure), not MDLM.
+7. **Pack the data.** No-pack wastes ~84% of each sequence on padding (avg 317 / max 2048). Packing gives ~6x throughput, enabling 2 epochs in the time of 1/3 epoch. The MDLM trainer already supports packing. For BD3LM, requires modifying the block-diagonal attention mask to handle packed sequence boundaries -- non-trivial but high payoff for training efficiency.
 
-8. **Self-consistency / majority voting.** Generate 128 samples, group by extracted answer, take the majority. Unlike outcome-only scoring, this doesn't require gold -- it's a legitimate inference strategy. Compare majority@128 vs pass@128 for dLLM and AR. Script ready: `scripts/gsm_infinity_ft_410m/run_ablation_n_samples.sh` (tests n={1,4,16,32,64,128,256} with saved generations for post-hoc majority analysis).
+8. **Constrained decoding for variable names.** At each "Define ... as X" position, constrain the sampler to output a variable letter not yet used. This surgically fixes the variable-collapse problem without changing the model or training. Implementation: track assigned variables during block-by-block generation, mask logits at variable-assignment positions. Only works for BD3LM (has left-to-right block structure), not MDLM.
+
+9. **Self-consistency / majority voting.** Generate 128 samples, group by extracted answer, take the majority. Unlike outcome-only scoring, this doesn't require gold -- it's a legitimate inference strategy. Compare majority@128 vs pass@128 for dLLM and AR. Script ready: `scripts/gsm_infinity_ft_410m/run_ablation_n_samples.sh` (tests n={1,4,16,32,64,128,256} with saved generations for post-hoc majority analysis).
 
 ### Scale up if 410M comparison is inconclusive
 
-9. **Pythia-1.4B BD3LM.** A2D conversion already on disk. The 160M->410M jump improved BD3LM process+outcome substantially (op=10: 0.045 -> 0.545). Another 3.5x may push OOD process+outcome into a clearer comparison range with AR.
+10. **Pythia-1.4B BD3LM.** A2D conversion already on disk. The 160M->410M jump improved BD3LM process+outcome substantially (op=10: 0.045 -> 0.545). Another 3.5x may push OOD process+outcome into a clearer comparison range with AR.
 
-10. **30B token dataset.** Run `precache_data.py --token_budget 30B` on existing raw data (~59B tokens available). Larger models may saturate on 6.1B tokens.
+11. **30B token dataset.** Run `precache_data.py --token_budget 30B` on existing raw data (~59B tokens available). Larger models may saturate on 6.1B tokens.
 
 ### Alternative experimental designs
 
-11. **Use a task where answers are not small integers.** GSM-Infinity gold answers skew toward 2, 3, 4 at high ops, creating noise for any metric. Consider a variant with uniformly distributed answers, or a different compositional reasoning task (e.g., logical deduction, multi-hop QA with string answers).
+12. **Use a task where answers are not small integers.** GSM-Infinity gold answers skew toward 2, 3, 4 at high ops, creating noise for any metric. Consider a variant with uniformly distributed answers, or a different compositional reasoning task (e.g., logical deduction, multi-hop QA with string answers).
 
-12. **Train on higher ops (e.g., 2-15) and test on 16-25.** Shifts the ID/OOD boundary so the model has more training signal for multi-step reasoning. If dLLMs generalize better, the effect should be visible regardless of where the boundary is.
+13. **Train on higher ops (e.g., 2-15) and test on 16-25.** Shifts the ID/OOD boundary so the model has more training signal for multi-step reasoning. If dLLMs generalize better, the effect should be visible regardless of where the boundary is.
 
-13. **Compare learning curves, not just final checkpoints.** Plot pass@128 (process+outcome) vs training tokens for both AR and BD3LM at each op level. If dLLMs learn OOD structure faster per token, that supports the hypothesis even if final accuracy is similar.
+14. **Compare learning curves, not just final checkpoints.** Plot pass@128 (process+outcome) vs training tokens for both AR and BD3LM at each op level. If dLLMs learn OOD structure faster per token, that supports the hypothesis even if final accuracy is similar.
 
