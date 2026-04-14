@@ -80,6 +80,15 @@ class DataArguments(dllm.utils.DataArguments):
             "cross-example contamination with block-diagonal attention."
         )},
     )
+    pack_masked: bool = field(
+        default=False,
+        metadata={"help": (
+            "If True, pack into fixed-length chunks while preserving per-example "
+            "prompt masking (labels=-100 before <solution>). Combines packing "
+            "efficiency with SFT-style masking. WARNING: not safe for BD3LM "
+            "block-diagonal attention -- use only with MDLM/AR."
+        )},
+    )
     mask_prompt_loss: bool = field(
         default=False,
         metadata={"help": (
@@ -271,7 +280,17 @@ def _load_raw_jsonl(data_args, tokenizer, training_args):
         desc="Composing text from problem/question/solution",
     )
 
-    if data_args.packing:
+    if data_args.pack_masked:
+        sol_boundary_ids = tokenizer.encode(" <solution>", add_special_tokens=False)
+        logger.info(f"pack_masked: boundary ids for ' <solution>' = {sol_boundary_ids}")
+        tokenize_fn = functools.partial(
+            dllm.utils.tokenize_and_group_masked,
+            tokenizer=tokenizer, text_field="text",
+            seq_length=data_args.max_length, insert_eos=data_args.insert_eos,
+            drop_tail=data_args.drop_tail, mask_boundary_ids=sol_boundary_ids,
+        )
+        desc = "Tokenizing, masking prompts, and packing (pack_masked)"
+    elif data_args.packing:
         tokenize_fn = functools.partial(
             dllm.utils.tokenize_and_group, tokenizer=tokenizer, text_field="text",
             seq_length=data_args.max_length, insert_eos=data_args.insert_eos,
@@ -425,7 +444,7 @@ def train():
                     tokenizer,
                     return_tensors="pt",
                     padding=True,
-                    label_pad_token_id=tokenizer.pad_token_id,
+                    label_pad_token_id=-100,
                 ),
                 block_size=training_args.block_size,
             ),

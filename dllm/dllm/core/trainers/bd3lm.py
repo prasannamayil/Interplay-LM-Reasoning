@@ -35,7 +35,7 @@ class AppendEOSBlockWrapper(CollatorWrapper):
             pad_len = target - L
             if pad_len > 0:
                 ex["input_ids"] = ids + [self.tokenizer.eos_token_id] * pad_len
-                ex["labels"] = labs + [self.tokenizer.eos_token_id] * pad_len
+                ex["labels"] = labs + [-100] * pad_len
         return features
 
 
