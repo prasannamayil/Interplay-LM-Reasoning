@@ -54,6 +54,7 @@ if [ -z "${TEMPERATURE+x}" ]; then
     fi
 fi
 BLOCK_SIZE_BD3LM="${BLOCK_SIZE_BD3LM:-16}"
+SAVE_GENERATIONS="${SAVE_GENERATIONS:-}"
 
 # =============================================================================
 # Configuration
@@ -99,6 +100,11 @@ fi
 # =============================================================================
 # Run Evaluation
 # =============================================================================
+EXTRA_ARGS=()
+if [ -n "${SAVE_GENERATIONS}" ]; then
+    EXTRA_ARGS+=(--save_generations)
+fi
+
 python examples/gsm_infinity/eval_pass128.py \
     --model_path "${MODEL_PATH}" \
     --sampler_type "${SAMPLER_TYPE}" \
@@ -109,7 +115,8 @@ python examples/gsm_infinity/eval_pass128.py \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
     --steps "${STEPS}" \
     --temperature "${TEMPERATURE}" \
-    --block_size_bd3lm "${BLOCK_SIZE_BD3LM}"
+    --block_size_bd3lm "${BLOCK_SIZE_BD3LM}" \
+    "${EXTRA_ARGS[@]}"
 
 echo ""
 echo "=============================================="

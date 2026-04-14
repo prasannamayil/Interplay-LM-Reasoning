@@ -377,9 +377,15 @@ def evaluate(
                             sequences = outputs.sequences
                         else:
                             sequences = outputs
+                    # BD3LM left-pads prompt to block_size boundary
+                    if sampler_type == "bd3lm":
+                        _bs = sampler_config.block_size
+                        _prompt_offset = ((len(prompt_ids) + _bs - 1) // _bs) * _bs
+                    else:
+                        _prompt_offset = len(prompt_ids)
                     for i in range(cur_batch_size):
                         seq = sequences[i].tolist()
-                        gen_ids = seq[len(prompt_ids):]
+                        gen_ids = seq[_prompt_offset:]
                         if eos_id is not None and eos_id in gen_ids:
                             gen_ids = gen_ids[:gen_ids.index(eos_id)]
                         mask_id = tokenizer.mask_token_id
