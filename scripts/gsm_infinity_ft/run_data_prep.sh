@@ -122,7 +122,7 @@ else
         --token_budget "${TOKEN_BUDGET}" \
         --op_min 2 --op_max 10 \
         --seq_length 2048 \
-        --num_proc 32 \
+        --num_proc 128 \
         --no_pack
 
     echo "[Step 3] Done."
@@ -168,10 +168,68 @@ else:
     print('  OK: Single problem per sequence')
 "
 
+# =========================================================================
+# Step 5: Create prompt-masked version (labels=-100 for <question>...</question>)
+#
+# This avoids a ~1h masking step at every training launch. The masked
+# dataset is saved alongside the original so both are available.
+# =========================================================================
+MASKED_OUTPUT_DIR="${PROJECT_ROOT}/data/composition_hf_dllm_10B_nopack_pythia_masked"
+if [[ -f "${MASKED_OUTPUT_DIR}/dataset_dict.json" ]]; then
+    echo "[Step 5] Prompt-masked dataset already exists at ${MASKED_OUTPUT_DIR}"
+else
+    echo "[Step 5] Applying prompt masking (labels=-100 for question tokens)..."
+    echo "  Source: ${OUTPUT_DIR}"
+    echo "  Output: ${MASKED_OUTPUT_DIR}"
+
+    NUM_PROC="${NUM_PROC:-128}"
+
+    python -c "
+from datasets import load_from_disk
+from transformers import AutoTokenizer
+
+ds = load_from_disk('${OUTPUT_DIR}')
+tok = AutoTokenizer.from_pretrained('${TOKENIZER_PATH}')
+sol_ids = tok.encode(' <solution>', add_special_tokens=False)
+sol_len = len(sol_ids)
+print(f'  \" <solution>\" token ids: {sol_ids} (len={sol_len})')
+
+def mask_prompt(examples):
+    new_labels = []
+    for ids, labs in zip(examples['input_ids'], examples['labels']):
+        boundary = -1
+        for i in range(len(ids) - sol_len + 1):
+            if ids[i : i + sol_len] == sol_ids:
+                boundary = i
+                break
+        if boundary > 0:
+            labs = [-100] * boundary + labs[boundary:]
+        new_labels.append(labs)
+    return {'labels': new_labels}
+
+for split_name in ds:
+    print(f'  Masking {split_name} ({len(ds[split_name]):,} examples)...')
+    ds[split_name] = ds[split_name].map(
+        mask_prompt, batched=True, num_proc=${NUM_PROC},
+        desc=f'Masking prompt labels ({split_name})',
+    )
+
+ds.save_to_disk('${MASKED_OUTPUT_DIR}')
+print(f'  Saved to ${MASKED_OUTPUT_DIR}')
+
+# Verify
+sample = ds['train'][0]
+n_masked = sum(1 for l in sample['labels'] if l == -100)
+print(f'  Verification: first example has {n_masked} masked tokens out of {len(sample[\"labels\"])} total')
+"
+    echo "[Step 5] Done."
+fi
+
 echo ""
 echo "============================================================"
 echo "Data preparation complete!"
-echo "  Dataset: ${OUTPUT_DIR}"
-echo "  A2D model: ${A2D_DIR}"
+echo "  Dataset (original):       ${OUTPUT_DIR}"
+echo "  Dataset (prompt-masked):  ${MASKED_OUTPUT_DIR}"
+echo "  A2D model:                ${A2D_DIR}"
 echo "  Ready for training scripts."
 echo "============================================================"

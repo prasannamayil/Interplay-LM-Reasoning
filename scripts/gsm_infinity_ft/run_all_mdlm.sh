@@ -1,12 +1,19 @@
 #!/bin/bash
 # =============================================================================
-# Script 2: MDLM (A2D Pythia-2.8b) -- Train + Eval on GSM-Infinity
+# MDLM (A2D Pythia-2.8b) -- Train + Multi-Checkpoint Eval on GSM-Infinity
 # =============================================================================
 # Finetune A2D-Pythia-2.8b with MDLM (masked diffusion) on GSM-Infinity
-# 10B nopack data, then evaluate on test_small with pass@1.
+# 10B nopack data, then evaluate ALL checkpoints with pass@1 and the best
+# with pass@128.
+#
+# Changes from v1:
+#   - Added --mask_prompt_loss True (only train on solution/answer tokens)
+#   - Collator now uses NoAttentionMaskWrapper + label_pad_token_id=pad_id
+#     (matching the working SFT setup)
+#   - Save every 500 steps, keep 25 checkpoints
+#   - Multi-checkpoint eval: pass@1 sweep + pass@128 on best
 #
 # Prerequisites: run scripts/gsm_infinity_ft/run_data_prep.sh first.
-# Estimated time: ~12-16h on 8x H100
 #
 # Usage:
 #   bash scripts/gsm_infinity_ft/run_all_mdlm.sh
@@ -18,7 +25,7 @@ PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
 VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
 
-DATASET_PATH="${PROJECT_ROOT}/data/composition_hf_dllm_10B_nopack_pythia"
+DATASET_PATH="${PROJECT_ROOT}/data/composition_hf_dllm_10B_nopack_pythia_masked"
 MODEL_PATH="${DLLM_ROOT}/.models/a2d/pythia-2.8b"
 OUTPUT_DIR="${PROJECT_ROOT}/results/gsm_infinity_ft/pythia-2.8b-mdlm"
 
@@ -26,7 +33,6 @@ export HF_HOME="${PROJECT_ROOT}/.hf_cache"
 export HF_DATASETS_CACHE="${PROJECT_ROOT}/.hf_cache/datasets"
 export WANDB_PROJECT="${WANDB_PROJECT:-gsm-infinity-ft}"
 
-# Verify prerequisites
 if [[ ! -f "${DATASET_PATH}/dataset_dict.json" ]]; then
     echo "Error: Dataset not found at ${DATASET_PATH}"
     echo "Run: bash scripts/gsm_infinity_ft/run_data_prep.sh"
@@ -40,6 +46,19 @@ fi
 
 source "${VENV}"
 export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH:-}"
+
+# Move old results out of the way (if any)
+if [[ -d "${OUTPUT_DIR}" ]]; then
+    OLD="${OUTPUT_DIR}_old_$(date +%Y%m%d_%H%M%S)"
+    echo "Moving old results: ${OUTPUT_DIR} -> ${OLD}"
+    mv "${OUTPUT_DIR}" "${OLD}"
+fi
+EVAL_OUTPUT="${PROJECT_ROOT}/results/gsm_infinity_ft/eval/pythia-2.8b-mdlm"
+if [[ -d "${EVAL_OUTPUT}" ]]; then
+    OLD="${EVAL_OUTPUT}_old_$(date +%Y%m%d_%H%M%S)"
+    echo "Moving old eval: ${EVAL_OUTPUT} -> ${OLD}"
+    mv "${EVAL_OUTPUT}" "${OLD}"
+fi
 
 # =========================================================================
 # Train MDLM Pythia-2.8b
@@ -72,8 +91,8 @@ accelerate launch \
     --bf16 True \
     --gradient_checkpointing True \
     --logging_steps 10 \
-    --save_steps 1000 \
-    --save_total_limit 10 \
+    --save_steps 500 \
+    --save_total_limit 25 \
     --eval_strategy "no" \
     --report_to wandb \
     --run_name "pythia-2.8b-mdlm-gsm-infinity" \
@@ -82,24 +101,22 @@ accelerate launch \
 echo "Training complete: ${OUTPUT_DIR}"
 
 # =========================================================================
-# Eval MDLM on test_small (pass@1)
+# Evaluate ALL checkpoints (pass@1 sweep + pass@128 on best)
 # =========================================================================
 echo ""
 echo "============================================================"
-echo "Evaluating MDLM checkpoint-final (pass@1)"
+echo "Evaluating all MDLM checkpoints"
 echo "============================================================"
 
-EVAL_OUTPUT="${PROJECT_ROOT}/results/gsm_infinity_ft/eval/pythia-2.8b-mdlm"
-
-bash "${DLLM_ROOT}/examples/gsm_infinity/run_eval.sh" \
-    "${OUTPUT_DIR}/checkpoint-final" \
+cd "${PROJECT_ROOT}"
+bash scripts/gsm_infinity_ft/run_eval_all_checkpoints.sh \
+    "${OUTPUT_DIR}" \
     mdlm \
-    "${EVAL_OUTPUT}/checkpoint-final" \
-    1
+    "${EVAL_OUTPUT}"
 
 echo ""
 echo "============================================================"
 echo "All done! Results at:"
 echo "  Model:   ${OUTPUT_DIR}"
-echo "  Eval:    ${EVAL_OUTPUT}/checkpoint-final/metrics.jsonl"
+echo "  Eval:    ${EVAL_OUTPUT}/"
 echo "============================================================"
