@@ -76,7 +76,12 @@ def _prepare_for_sampling(
     valid_k = bid_k >= 0
 
     base_mask = bid_k <= bid_q
-    attn_mask = base_mask & valid_q & valid_k  # [B, 1, T, T]
+    bool_mask = base_mask & valid_q & valid_k  # [B, 1, T, T]
+
+    # Convert to float attention mask: 0.0 for attend, large negative for don't-attend.
+    # Must match model dtype (bfloat16) since SDPA requires bias dtype == query dtype.
+    attn_mask = torch.zeros_like(bool_mask, dtype=torch.bfloat16)
+    attn_mask.masked_fill_(~bool_mask, torch.finfo(torch.bfloat16).min)
 
     return attn_mask, position_ids
 
@@ -285,41 +290,8 @@ class BD3LMSampler(BaseSampler):
             x_prefix = x  # [B, T_prefix]
             B_cur, T_prefix = x_prefix.shape
 
-            prefix_attn, prefix_pos = _prepare_for_sampling(
-                x=x_prefix,
-                block_size=block_size,
-                pad_token_id=pad_id,
-            )  # [B,1,T_prefix,T_prefix], [B,T_prefix]
-
-            # Conditional prefix cache + last logits
-            out_prefix = self.model(
-                x_prefix,
-                attention_mask=prefix_attn,
-                position_ids=prefix_pos,
-                use_cache=True,
-            )
-            cond_past = out_prefix.past_key_values
-            cond_prefix_last_logits = out_prefix.logits[:, -1:, :]  # [B, 1, V]
-
-            # Unconditional prefix cache + last logits (if CFG enabled)
-            if cfg_scale > 0.0:
-                un_x_prefix = x_prefix.clone()
-                un_x_prefix[unmasked_index] = mask_id
-
-                out_un_prefix = self.model(
-                    un_x_prefix,
-                    attention_mask=prefix_attn,
-                    position_ids=prefix_pos,
-                    use_cache=True,
-                )
-                uncond_past = out_un_prefix.past_key_values
-                uncond_prefix_last_logits = out_un_prefix.logits[:, -1:, :]  # [B, 1, V]
-            else:
-                uncond_past = None
-                uncond_prefix_last_logits = None
-
             # ------------------------------------------------------
-            # 2.2) Append new block of mask tokens to the right
+            # 2.1) Append new block of mask tokens to the right
             # ------------------------------------------------------
             new_block = torch.full(
                 (B, cur_block_len), mask_id, dtype=torch.long, device=self.model.device
@@ -348,19 +320,6 @@ class BD3LMSampler(BaseSampler):
             )
             effective_steps = num_transfer_tokens.size(1)
 
-            # Full attention mask + pos for prefix + current block
-            full_attention_mask, full_position_ids = _prepare_for_sampling(
-                x=x,
-                block_size=block_size,
-                pad_token_id=pad_id,
-            )  # [B,1,T_total,T_total], [B,T_total]
-
-            # Block view
-            attn_block = full_attention_mask[
-                :, :, T_prefix:T_total, :
-            ]  # [B,1,L_q,T_total]
-            pos_block = full_position_ids[:, T_prefix:T_total]  # [B,L_q]
-
             # ======================================================
             # 3) Inner diffusion loop within the current block
             # ======================================================
@@ -371,30 +330,48 @@ class BD3LMSampler(BaseSampler):
                 if not mask_block.any():
                     break
 
-                # ---- Conditional logits for current block ----
-                cond_logits_block = self.model(
-                    x_block,
-                    attention_mask=attn_block,
-                    position_ids=pos_block,
-                    past_key_values=copy.deepcopy(cond_past),
+                # A2D models don't support KV caching (bidirectional attention),
+                # so we run the full sequence (prefix + current block) each step
+                # and slice out the logits for the current block.
+                full_attention_mask, full_position_ids = _prepare_for_sampling(
+                    x=x,
+                    block_size=block_size,
+                    pad_token_id=pad_id,
+                )
+
+                cond_logits_full = self.model(
+                    x,
+                    attention_mask=full_attention_mask,
+                    position_ids=full_position_ids,
                     use_cache=False,
-                ).logits  # [B, cur_block_len, V]
+                ).logits  # [B, T_total, V]
+
+                # Slice logits for current block only
+                cond_logits_block = cond_logits_full[:, T_prefix:T_total, :]
+                cond_prefix_last_logits = cond_logits_full[:, T_prefix - 1 : T_prefix, :]
 
                 logits_block = cond_logits_block
 
                 # ---- Optional CFG ----
                 if cfg_scale > 0.0:
-                    un_logits_block = self.model(
-                        x_block,
-                        attention_mask=attn_block,
-                        position_ids=pos_block,
-                        past_key_values=copy.deepcopy(uncond_past),
+                    un_x = x.clone()
+                    un_x[unmasked_index[:, :T_total]] = mask_id
+
+                    un_logits_full = self.model(
+                        un_x,
+                        attention_mask=full_attention_mask,
+                        position_ids=full_position_ids,
                         use_cache=False,
-                    ).logits  # [B, cur_block_len, V]
+                    ).logits
+
+                    un_logits_block = un_logits_full[:, T_prefix:T_total, :]
+                    uncond_prefix_last_logits = un_logits_full[:, T_prefix - 1 : T_prefix, :]
 
                     logits_block = un_logits_block + (cfg_scale + 1.0) * (
                         cond_logits_block - un_logits_block
                     )
+                else:
+                    uncond_prefix_last_logits = None
 
                 # ---- Global AR-style right shift across blocks ----
                 if right_shift_logits:

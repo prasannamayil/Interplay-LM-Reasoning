@@ -1,5 +1,5 @@
 """
-Pre-train A2D-Qwen2 100M with Masked Diffusion (MDLM) on GSM-Infinity composition data.
+Pre-train / fine-tune A2D models with Masked Diffusion (MDLM) on GSM-Infinity.
 
 Data loading options (in priority order):
   1. --raw_data_dir <path>   Load raw JSONL, tokenize inline with HF caching (no preprocessing)
@@ -23,6 +23,14 @@ Examples:
         --config_file scripts/accelerate_configs/zero2.yaml \
         examples/gsm_infinity/pt_mdlm.py \
         --raw_data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train
+
+    # Finetuning with prompt masking (recommended for conditional generation):
+    accelerate launch \
+        --config_file scripts/accelerate_configs/zero2.yaml \
+        examples/gsm_infinity/pt_mdlm.py \
+        --dataset_args /path/to/pretokenized_data \
+        --load_preprocessed_data True \
+        --mask_prompt_loss True
 """
 
 import functools
@@ -38,6 +46,8 @@ import dllm
 logger = dllm.utils.get_default_logger(__name__)
 
 PROJECT_ROOT = "/fast/pmayilvahanan/Interplay-LM-Reasoning"
+
+_SOLUTION_START_TAG = " <solution>"
 
 
 @dataclass
@@ -81,6 +91,15 @@ class DataArguments(dllm.utils.DataArguments):
             "If True, concatenate+slice into fixed-length chunks (legacy behaviour). "
             "If False (default), tokenize each example individually to avoid "
             "cross-example contamination with block-diagonal attention."
+        )},
+    )
+    mask_prompt_loss: bool = field(
+        default=False,
+        metadata={"help": (
+            "If True, set labels=-100 for the <question>...</question> prompt tokens "
+            "so the model only trains to generate <solution>...<answer>... portions. "
+            "Recommended for finetuning (conditional generation). "
+            "For pretraining from scratch, keep False."
         )},
     )
 
@@ -149,6 +168,27 @@ def _compose_text_batch(examples):
             parts.extend(["<answer>", answer, "</answer>"])
         texts.append(" ".join(parts))
     return {"text": texts}
+
+
+def _apply_prompt_masking(examples, tokenizer):
+    """Set labels=-100 for tokens before <solution>, so diffusion loss
+    is only computed on the <solution>...<answer>... portion.
+    Uses ' <solution>' (with leading space) as boundary marker since BPE
+    tokenization of '</question>' is context-dependent."""
+    sol_ids = tokenizer.encode(_SOLUTION_START_TAG, add_special_tokens=False)
+    sol_len = len(sol_ids)
+
+    new_labels = []
+    for ids, labs in zip(examples["input_ids"], examples["labels"]):
+        boundary = -1
+        for i in range(len(ids) - sol_len + 1):
+            if ids[i : i + sol_len] == sol_ids:
+                boundary = i
+                break
+        if boundary > 0:
+            labs = [-100] * boundary + labs[boundary:]
+        new_labels.append(labs)
+    return {"labels": new_labels}
 
 
 def _readable2int(size_str):
@@ -410,19 +450,34 @@ def train():
     with accelerate.PartialState().local_main_process_first():
         dataset = _load_dataset(data_args, tokenizer, training_args)
 
+        if data_args.mask_prompt_loss:
+            logger.info("Applying prompt masking: labels=-100 for <question>...</question> tokens")
+            from functools import partial as _partial
+            mask_fn = _partial(_apply_prompt_masking, tokenizer=tokenizer)
+            for split_name in dataset:
+                dataset[split_name] = dataset[split_name].map(
+                    mask_fn,
+                    batched=True,
+                    num_proc=getattr(data_args, "num_proc", None),
+                    desc=f"Masking prompt labels ({split_name})",
+                )
+
     # ----- Training ---------------------------------------------------------------
     accelerate.PartialState().wait_for_everyone()
-    logger.info("Start MDLM pre-training...")
+    logger.info("Start MDLM training...")
     trainer = dllm.core.trainers.MDLMTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("test", None),
         args=training_args,
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer,
-            return_tensors="pt",
-            padding=True,
+        data_collator=dllm.utils.NoAttentionMaskWrapper(
+            transformers.DataCollatorForSeq2Seq(
+                tokenizer,
+                return_tensors="pt",
+                padding=True,
+                label_pad_token_id=tokenizer.pad_token_id,
+            ),
         ),
     )
     trainer.train()
