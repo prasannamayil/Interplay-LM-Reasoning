@@ -455,6 +455,20 @@ Scripts created for this analysis:
 
 ---
 
+## Decoding Strategy
+
+BD3LM uses **Gumbel-max sampling with confidence-based remasking**:
+
+1. At each inner diffusion step, sample token proposals via `argmax(logits + Gumbel_noise * temperature)`.
+2. Compute confidence = `softmax(logits)` at each proposed token position.
+3. Commit only the top-k highest-confidence positions (k determined by the schedule); remask the rest.
+4. Repeat for `steps_per_block` iterations per block.
+5. Move to the next block (left-to-right).
+
+No top-k filtering, top-p, or beam search. Temperature controls Gumbel noise magnitude (0.0 = greedy, 0.7 = stochastic for diversity). The `low_confidence` remasking strategy means uncertain positions get more refinement passes.
+
+---
+
 ## Next Steps
 
 ### Immediate (unblock the comparison)
@@ -467,31 +481,29 @@ Scripts created for this analysis:
 
 ### Improve dLLM process+outcome scores (the core problem)
 
-The fundamental issue is that process+outcome drops sharply after op=10 for BD3LM. To show the hypothesis, we need dLLM OOD process+outcome to degrade slower than AR. Concrete approaches:
+The fundamental issue is that process+outcome drops sharply after op=10 for BD3LM. To show the hypothesis, we need dLLM OOD process+outcome to degrade slower than AR. Concrete approaches, in order of priority:
 
-4. **Increase block_size to 64 or 128.** The variable-name collapse analysis showed the issue is within-block parallel denoising. Larger blocks mean more of the solution is generated with prior context committed. A step is ~20-25 tokens, so block_size=64 fits 2-3 full steps per block, potentially fixing cross-step symbolic consistency. Cost: ~2x memory per batch (from doubled concat length), so halve per-device batch. Worth trying at 410M.
+4. **More diffusion steps at eval time.** Current eval uses steps=64. The model may need more refinement iterations to coordinate symbolic tokens at high ops. This is the cheapest experiment: eval-only, no retraining, parallelize across GPUs. Script ready: `scripts/gsm_infinity_ft_410m/run_ablation_diffusion_steps.sh` (tests steps={8,16,32,64,128,256,512} on ops 2,5,10,15,20 with saved generations). If steps=256 substantially improves OOD process+outcome, the model has the capacity but was under-iterated at 64.
 
-5. **More diffusion steps at eval time.** Current eval uses steps=64. The model may need more refinement iterations to coordinate symbolic tokens at high ops. Try steps=128, 256 on a few OOD checkpoints. This is cheap (eval-only, no retraining).
+5. **Progressive block-size schedule (LLaDA 2.0 style).** Use a coarse-to-fine schedule at inference: first denoise the full solution with large blocks to get the global structure (step count, entity names, answer magnitude), then refine with smaller blocks for local symbolic consistency (variable letters, cross-references). This directly addresses the observed failure mode: the model gets the computation right globally but fails at local token coordination. Can be applied at eval time without retraining (multi-pass with decreasing block_size). During training, anneal block_size from small to large as a curriculum.
 
-6. **Self-consistency / majority voting.** Generate 128 samples, group by extracted answer, take the majority answer. This leverages the model's ability to get the right answer sometimes even when process fails. Unlike outcome-only scoring, it doesn't require gold -- it's a legitimate inference strategy. Compare majority@128 vs pass@128 for dLLM and AR.
+6. **Pack the data.** No-pack wastes ~84% of each sequence on padding (avg 317 / max 2048). Packing gives ~6x throughput, enabling 2 epochs in the time of 1/3 epoch. The MDLM trainer already supports packing. For BD3LM, requires modifying the block-diagonal attention mask to handle packed sequence boundaries -- non-trivial but high payoff for training efficiency.
 
 7. **Constrained decoding for variable names.** At each "Define ... as X" position, constrain the sampler to output a variable letter not yet used. This surgically fixes the variable-collapse problem without changing the model or training. Implementation: track assigned variables during block-by-block generation, mask logits at variable-assignment positions. Only works for BD3LM (has left-to-right block structure), not MDLM.
 
-8. **Progressive block-size schedule (LLaDA 2.0 style).** Start with a small block_size (e.g., 8 or 16) and increase it over training, or use a coarse-to-fine schedule at inference: first denoise the full sequence with large blocks to get the global structure (answer magnitude, step count, entity names), then refine with smaller blocks for local consistency (variable letters, cross-references). This directly addresses the failure mode: the model gets the global computation right but fails at local symbolic coordination. A progressive schedule lets the model allocate more refinement budget to the hard tokens. Can be applied at eval time without retraining (vary block_size across denoising passes) or during training (curriculum on block_size).
+8. **Self-consistency / majority voting.** Generate 128 samples, group by extracted answer, take the majority. Unlike outcome-only scoring, this doesn't require gold -- it's a legitimate inference strategy. Compare majority@128 vs pass@128 for dLLM and AR. Script ready: `scripts/gsm_infinity_ft_410m/run_ablation_n_samples.sh` (tests n={1,4,16,32,64,128,256} with saved generations for post-hoc majority analysis).
 
 ### Scale up if 410M comparison is inconclusive
 
-8. **Pythia-1.4B BD3LM.** A2D conversion already on disk. The 160M->410M jump improved BD3LM process+outcome substantially (op=10: 0.045 -> 0.545). Another 3.5x may push OOD process+outcome into the range where the comparison with AR is clear.
+9. **Pythia-1.4B BD3LM.** A2D conversion already on disk. The 160M->410M jump improved BD3LM process+outcome substantially (op=10: 0.045 -> 0.545). Another 3.5x may push OOD process+outcome into a clearer comparison range with AR.
 
-9. **Pack the data.** No-pack wastes ~84% of each sequence on padding (avg 317 / max 2048). Packing would give ~6x throughput, enabling 2 epochs in the time of 1/3 epoch. Requires modifying BD3LM's block-diagonal attention mask to handle packed boundaries, but the MDLM trainer already supports packing.
-
-10. **30B token dataset.** Run `precache_data.py --token_budget 30B` on existing raw data (~59B tokens available). Larger models may saturate on 6.1B tokens -- more data ensures the comparison isn't bottlenecked by data.
+10. **30B token dataset.** Run `precache_data.py --token_budget 30B` on existing raw data (~59B tokens available). Larger models may saturate on 6.1B tokens.
 
 ### Alternative experimental designs
 
-11. **Use a task where answers are not small integers.** GSM-Infinity's answer distribution skews toward 2, 3, 4 at high ops, creating noise for any metric. Consider a variant with uniformly distributed answers, or a different compositional reasoning task (e.g., logical deduction, multi-hop QA with string answers).
+11. **Use a task where answers are not small integers.** GSM-Infinity gold answers skew toward 2, 3, 4 at high ops, creating noise for any metric. Consider a variant with uniformly distributed answers, or a different compositional reasoning task (e.g., logical deduction, multi-hop QA with string answers).
 
-12. **Train on higher ops (e.g., 2-15) and test on 16-25.** This shifts the ID/OOD boundary so the model has more training signal for multi-step reasoning. If dLLMs generalize better, the effect should be visible regardless of where the boundary is.
+12. **Train on higher ops (e.g., 2-15) and test on 16-25.** Shifts the ID/OOD boundary so the model has more training signal for multi-step reasoning. If dLLMs generalize better, the effect should be visible regardless of where the boundary is.
 
 13. **Compare learning curves, not just final checkpoints.** Plot pass@128 (process+outcome) vs training tokens for both AR and BD3LM at each op level. If dLLMs learn OOD structure faster per token, that supports the hypothesis even if final accuracy is similar.
 
