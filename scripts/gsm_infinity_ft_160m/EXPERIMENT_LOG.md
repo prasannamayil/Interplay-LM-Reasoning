@@ -142,19 +142,20 @@ bash scripts/gsm_infinity_ft_160m/run_sanity_check.sh
 Eval still running for ops 10, 17. Completed ops so far:
 
 
-| op | pass@k | old process+outcome | outcome-only | fixed process+outcome |
-| -- | ------ | ------------------- | ------------ | --------------------- |
-| 2  | @1     | 0.538               | 0.995        | 0.995                 |
-| 2  | @128   | 0.990               | 0.995        | 0.995                 |
-| 5  | @1     | 0.032               | 0.965        | 0.665                 |
-| 5  | @128   | 0.070               | 0.970        | 0.845                 |
-| 10 | @1     | 0.000               | 0.455        | 0.004                 |
-| 10 | @128   | 0.020               | 0.825        | 0.045                 |
+| op  | pass@k | old process+outcome | outcome-only | fixed process+outcome |
+| --- | ------ | ------------------- | ------------ | --------------------- |
+| 2   | @1     | 0.538               | 0.995        | 0.995                 |
+| 2   | @128   | 0.990               | 0.995        | 0.995                 |
+| 5   | @1     | 0.032               | 0.965        | 0.665                 |
+| 5   | @128   | 0.070               | 0.970        | 0.845                 |
+| 10  | @1     | 0.000               | 0.455        | 0.004                 |
+| 10  | @128   | 0.020               | 0.825        | 0.045                 |
 
 
 Massive improvement over 5K-step sanity check. The "old process+outcome" column is the original scorer that rejects correct arithmetic due to variable-name collapse. The "fixed process+outcome" column uses the patched scorer (see fix section below). The gap between outcome-only and fixed process shows genuine reasoning failures (wrong steps, missing nodes) vs scoring artifacts.
 
 **Key observations**:
+
 - **op=2**: Model effectively solves all problems. Old scorer was undercounting by ~46% at pass@1.
 - **op=5**: Outcome-only is 96.5% at pass@1 but fixed process is 66.5% -- the model gets the right answer but ~30% of solutions have garbled reasoning that even the lenient scorer can't recover.
 - **op=10**: Outcome-only drops to 45.5% pass@1, and fixed process collapses to 0.4%. The model struggles with longer chains -- of 94 outcome-correct examples (gen[0]), only 52 even have the right number of computation steps. This is a genuine 160M capacity limit.
@@ -165,16 +166,19 @@ Process+outcome scoring requires the generated solution's dependency graph to ma
 
 **op=5 breakdown**:
 
-| Metric                                              | Value        |
-| --------------------------------------------------- | ------------ |
-| Examples with >=1 outcome-correct sample (of 128)   | **194 / 200** (97%) |
-| Examples with >=1 process+outcome-correct sample     | **14 / 200** (7%)  |
-| Reported pass@128                                    | **0.070**    |
-| Estimated pass@128 under outcome-only scoring        | **~0.97**    |
+
+| Metric                                            | Value               |
+| ------------------------------------------------- | ------------------- |
+| Examples with >=1 outcome-correct sample (of 128) | **194 / 200** (97%) |
+| Examples with >=1 process+outcome-correct sample  | **14 / 200** (7%)   |
+| Reported pass@128                                 | **0.070**           |
+| Estimated pass@128 under outcome-only scoring     | **~0.97**           |
+
 
 The model has learned the arithmetic but **not the variable-naming discipline**. It reuses the same letter (usually `t` or `x`) for every variable, making the dependency graph unparseable.
 
 **Gold solution** (op=5, distinct variable names):
+
 ```
 Define public highschool in Riverton City as s; so s = 4.
 Define regional medical school in Riverton City as T; B = s = 4; so T = 3 + B = 7.
@@ -182,6 +186,7 @@ Define total number of schools in Riverton City as v; so v = s + T = 4 + 7 = 11.
 ```
 
 **Model generation** (variable-name collapse — all `t`):
+
 ```
 Define public highschool in Riverton City as t; so t = 4.
 Define regional medical school in Riverton City as t; t = a = 4; so t = 3 + t = 7.
@@ -194,14 +199,17 @@ The model also introduces phantom variables (`a`, `w`, `s`) that reference nothi
 
 Despite the variable-name mess, the underlying computation is largely correct:
 
-| What was checked (op=5, first 50 examples) | Result |
-| ------------------------------------------- | ------ |
-| Entity names + locations match gold | **49/50** (98%) |
+
+| What was checked (op=5, first 50 examples)                            | Result                     |
+| --------------------------------------------------------------------- | -------------------------- |
+| Entity names + locations match gold                                   | **49/50** (98%)            |
 | Equation setup matches gold (equation-style problems, e.g. `3*x = 9`) | **5/5** checked: all match |
-| Intermediate numerical value sequences match gold exactly | **34/50** (68%) |
-| Final answer matches gold | **~194/200** (97%) |
+| Intermediate numerical value sequences match gold exactly             | **34/50** (68%)            |
+| Final answer matches gold                                             | **~194/200** (97%)         |
+
 
 The 32% of intermediate-value mismatches are almost all in the **reference sub-expressions** (which prior result gets plugged in), not in the actual arithmetic. For example:
+
 - Gold: `v = s + T = 4 + 7 = 11` (references s=4)
 - Model: `t = t + t = 7 + 4 = 11` (writes 7 instead of 4 as the reference, but the sum is still correct)
 
@@ -210,6 +218,7 @@ The model is solving the right problem, with the right entities, the right opera
 #### Why This Happens
 
 The variable-name collapse is a **parallel-denoising coordination failure**. In masked diffusion:
+
 - Each masked position is denoised based on the surrounding context, but all positions are updated in parallel (or in large blocks).
 - The token position for "variable letter" in step 1 and "variable letter" in step 3 are both independently likely to decode as `t` (the most common single-letter variable in the training data).
 - There's no left-to-right causal constraint forcing step 3's variable to be different from step 1's.
@@ -234,22 +243,19 @@ This is not a capacity or data problem. The model has clearly learned **what** t
 The process scorer (`utils/solution_dependency_graph.py`) was brittle to variable reuse and phantom variables. Four fixes applied:
 
 1. **Variable reuse tolerance**: Changed `var_to_param` (single mapping) to `var_to_params` (list of all parameter names mapped to each variable letter). When the model reuses `t` for steps 1, 2, 3, references to `t` now resolve to all prior steps, not just the last one.
-
 2. **Phantom variable resolution**: When the model introduces random letters (`s`, `w`, `e`) that were never formally defined, the parser now extracts their assigned values from sub-expressions (e.g. `s=3` inside `t = s = 3`) and resolves dependencies by value-matching against prior steps.
-
 3. **Intermediate dependency propagation**: In equation-style solutions, intermediate phantom variables (`k`, `i`, `r`) accumulate dependencies on prior steps (via `x`) but these never reached the step's dependency set. Now all intermediate deps are propagated up to the step.
-
 4. **"We know" value extraction + intermediate fallback**: For equation-style steps where the current_var never appears on the LHS, the parser now extracts values from "We know X = N" patterns and falls back to the last intermediate value.
 
 **Impact on gen[0] process+outcome pass rate**:
 
 
-| Scorer version                           | op=2          | op=5          |
-| ---------------------------------------- | ------------- | ------------- |
-| Original                                 | 53.8%         | 7.0% (14/200) |
-| + var reuse fix                          | 74.0%         | 23.5%         |
-| + phantom fix                            | 74.0%         | 40.0%         |
-| + intermediate deps + value extraction   | **99.5%**     | **68.0%**     |
+| Scorer version                         | op=2      | op=5          |
+| -------------------------------------- | --------- | ------------- |
+| Original                               | 53.8%     | 7.0% (14/200) |
+| + var reuse fix                        | 74.0%     | 23.5%         |
+| + phantom fix                          | 74.0%     | 40.0%         |
+| + intermediate deps + value extraction | **99.5%** | **68.0%**     |
 
 
 **Validated on op=10** (unseen during fix development): Gold self-compare 200/200 pass, no regressions. op=10 fixed process goes from 0.02% to 0.5% -- minimal because the failures at op=10 are genuinely missing computation steps (model drops nodes), not scorer artifacts.
@@ -258,18 +264,234 @@ Remaining op=5 failures (64/200): 35 dependency-only, 19 value+dependency, 3 mis
 
 ---
 
-## Future Plans
+## Next Runs: Pythia-410M (MDLM + BD3LM)
 
-### After 160M Results
+### Hypothesis: BD3LM May Reduce Variable-Name Collapse
 
-- If working: run BD3LM-bs16 and BD3LM-bs32 at 160M with same setup
-- Scale to Pythia-410M (24 layers, 1024 hidden) — closer to working Qwen2-400M
-- Compare in-dist (op 2-10) vs OOD (op 11-20) trends across model families
+MDLM denoises all positions in parallel -- variable-name positions at step 1 and step 3 are denoised simultaneously with no causal ordering, so both converge to `t`. BD3LM generates in blocks of `block_size` tokens left-to-right. Each new block attends to all prior blocks as committed context. If a prior block already committed variable `s`, the current block can condition on it.
 
-### Potential Improvements
+**Key question**: does a computation step fit within one block?
 
-- **Pack the data**: Would 6x throughput, matching Qwen2 setup. But loses per-example boundaries.
-- **Increase to 2-3 epochs**: More data coverage for better convergence.
-- **Progressive block-size warmup** (LLaDA2.0 style) for larger models.
-- **Outcome-only scoring** for fair comparison with old Qwen2 results.
+A typical step (`Define public highschool in Riverton City as s; so s = 4.`) is ~20-25 tokens. So:
+
+- **block_size=16**: Step doesn't fit in one block, but prior step's variable is visible as prefix. Partial help.
+- **block_size=32**: Full step fits in one block, prior steps fully visible. Should substantially reduce cross-step variable collapse.
+- **block_size=64+**: Multiple steps per block -- within-block positions still denoised in parallel, so marginal improvement over 32.
+
+**Prediction**: block_size=32 is the sweet spot. Won't fully eliminate phantom variables (random letters in intermediate expressions are a learned format issue, not a parallel-denoising artifact), but should fix the primary variable-reuse problem.
+
+### Runs Queued
+
+
+| Script                                           | Model       | Method      | Config                        |
+| ------------------------------------------------ | ----------- | ----------- | ----------------------------- |
+| `scripts/gsm_infinity_ft_410m/run_train_eval.sh` | Pythia-410M | MDLM        | 38K steps, LR 5e-5, batch 512 |
+| `scripts/gsm_infinity_ft_410m/run_bd3lm_bs32.sh` | Pythia-410M | BD3LM bs=32 | 38K steps, LR 5e-5, batch 512 |
+
+
+Both reuse the existing 6.1B masked dataset (same Pythia tokenizer). A2D conversion for 410M is included in the scripts (auto-downloads and converts).
+
+**410M batch sizing** (8x 80GB A100s, ZeRO-2):
+
+
+|                        | MDLM 410M | BD3LM 410M     |
+| ---------------------- | --------- | -------------- |
+| per_device_batch       | 32        | 16             |
+| grad_accum             | 2         | 4              |
+| effective batch        | 512       | 512            |
+| gradient_checkpointing | on        | on             |
+| attn_implementation    | default   | flex_attention |
+
+
+BD3LM halves per-device batch because it concatenates x_t + x_0 (doubles sequence length to 4096). `flex_attention` uses `create_block_mask` for efficient fused attention with the BD3LM 3-component mask (M_BD + M_OBC + M_BC). Falls back to `sdpa` if PyTorch < 2.5 -- same mask, just materializes the full [4096, 4096] matrix (slower, more memory, but mathematically identical).
+
+### Ablation Runs (160M checkpoint)
+
+
+| Script                                                         | What it tests                                                |
+| -------------------------------------------------------------- | ------------------------------------------------------------ |
+| `scripts/gsm_infinity_ft_160m/run_ablation_diffusion_steps.sh` | Steps = {8, 16, 32, 48, 64, 96, 128} on ops 2, 5, 10         |
+| `scripts/gsm_infinity_ft_160m/run_ablation_eval_examples.sh`   | N = {10, 25, 50, 75, 100, 150, 200} examples on ops 2, 5, 10 |
+
+
+---
+
+## 410M Results
+
+### BD3LM-bs32 410M, checkpoint-30000 (process+outcome, fixed scorer, pass@128)
+
+| op  | pass@1 | pass@128 |
+| --- | ------ | -------- |
+| 2   | 1.000  | 1.000    |
+| 3   | 0.377  | 0.965    |
+| 4   | 0.530  | 0.935    |
+| 5   | 0.600  | 0.975    |
+| 6   | 0.401  | 0.725    |
+| 7   | 0.246  | 0.680    |
+| 8   | 0.225  | 0.690    |
+| 9   | 0.111  | 0.545    |
+| 10  | 0.102  | 0.545    |
+| 11  | 0.047  | 0.415    |
+| 12  | 0.036  | 0.375    |
+| 13  | 0.016  | 0.265    |
+| 14  | 0.002  | 0.085    |
+| 15  | 0.002  | 0.070    |
+| 16  | 0.000  | 0.015    |
+| 17  | 0.000  | 0.015    |
+| 18  | 0.000  | 0.005    |
+| 19  | 0.000  | 0.000    |
+| 20  | 0.000  | 0.000    |
+
+**Aggregated (process+outcome, pass@128)**:
+
+| Range        | avg   |
+| ------------ | ----- |
+| ID (2-10)    | 0.784 |
+| OOD (11-20)  | 0.125 |
+| OOD/ID ratio | 0.159 |
+
+BD3LM shows clear OOD generalization at ops 11-13 (26-41% pass@128), dropping sharply after op=14. This is with the fixed process scorer, so these are genuine reasoning+answer matches.
+
+### BD3LM Training Curve (ID vs OOD over checkpoints)
+
+| Checkpoint | ID @128 avg | OOD @128 avg | OOD/ID ratio |
+| ---------- | ----------- | ------------ | ------------ |
+| 10000      | 0.756       | 0.067        | 0.089        |
+| 16000      | 0.785       | 0.082        | 0.104        |
+| 22000      | 0.784       | 0.105        | 0.134        |
+| 28000      | 0.796       | 0.114        | 0.143        |
+| 30000      | 0.784       | 0.125        | 0.159        |
+
+OOD improves with training (0.089 to 0.159) while ID saturates. The model keeps generalizing after ID plateaus.
+
+### MDLM 410M, checkpoint-final (process+outcome, pass@128)
+
+| op  | pass@1 | pass@128 |
+| --- | ------ | -------- |
+| 2   | 0.998  | 1.000    |
+| 5   | 0.391  | 0.930    |
+| 10  | 0.010  | 0.160    |
+| 17  | 0.000  | 0.000    |
+
+Only 4 ops evaluated. BD3LM substantially outperforms MDLM (op=10: 0.545 vs 0.160 pass@128), confirming block-structured generation helps.
+
+### AR 410M: Eval Incomplete
+
+AR 410M eval was interrupted (only ops 2-3 per checkpoint). Eval script ready: `scripts/gsm_infinity_ft_410m/eval_ar_checkpoints_pass128.sh`.
+
+### 2.8B AR Reference (process+outcome, pass@16)
+
+| op range     | pass@16 avg |
+| ------------ | ----------- |
+| ID (2-10)    | 0.969       |
+| OOD (11-20)  | 0.567       |
+| OOD/ID ratio | 0.585       |
+
+Note: pass@16 (not @128), 7x larger model. Not directly comparable, but included for reference.
+
+---
+
+## Why Outcome-Only Scoring Is Unreliable at High Ops
+
+We also re-scored all BD3LM generations with outcome-only (answer match, no process check). The results look dramatic on the surface:
+
+| op  | process+outcome | outcome-only |
+| --- | --------------- | ------------ |
+| 2   | 1.000           | 1.000        |
+| 5   | 0.975           | 1.000        |
+| 10  | 0.545           | 0.980        |
+| 15  | 0.070           | 0.810        |
+| 20  | 0.000           | 0.575        |
+
+But inspecting the actual generated text at high ops reveals the outcome-only numbers are inflated by two mechanisms that have nothing to do with correct reasoning.
+
+### Problem 1: Garbled Reasoning with Forced Answers
+
+At high ops, the model produces increasingly garbled text that happens to end with the right number. Example at op=20 (gold=3):
+
+```
+Define adult eagle in Hamilton Farm as H; r = p + x = x +x + 4 + 4 = 5*x + 4;
+so + = + t = 53x + 4 (5*x + 4) = 15*x + 12.
+...
+We know F = 31, so we have 23*x + 23 = 31
+...
+23*x = 22. Divide both sides by 23: x = 22 / 23. Solution: x = 3.
+```
+
+The equation `23*x = 22` does not yield `x = 3`. The model writes garbled arithmetic and forces the final answer. Among equation-style generations that are outcome-correct:
+
+| op  | x = N/M arithmetic is correct | x = N/M arithmetic is wrong |
+| --- | ----------------------------- | --------------------------- |
+| 5   | 99.9%                         | 0.1%                        |
+| 10  | 87%                           | 13%                         |
+| 15  | **55%**                       | **45%**                     |
+| 20  | **21%**                       | **79%**                     |
+
+At op=20, 79% of the "correct" equation-style answers arrive through wrong arithmetic. The model is pattern-matching the answer, not solving.
+
+### Problem 2: Answer-Distribution Overlap
+
+GSM-Infinity gold answers skew heavily toward small integers. At op=20, 45% of gold answers are 2, 3, or 4. The model also outputs 2, 3, 4 preferentially. A permutation test (shuffle gold answers across examples, check match rate) gives:
+
+| op  | actual outcome-correct | random baseline | genuine signal | signal as % of observed |
+| --- | ---------------------- | --------------- | -------------- | ----------------------- |
+| 5   | 99.4%                  | 9.6%            | 89.8%          | 90%                     |
+| 10  | 81.2%                  | 8.2%            | 73.0%          | 90%                     |
+| 15  | 30.0%                  | 5.5%            | 24.6%          | 82%                     |
+| 20  | 16.7%                  | 7.2%            | 9.5%           | **57%**                 |
+
+At op=20, 43% of "correct" answers are explainable by the model's small-integer bias coinciding with the gold answer distribution. The per-example data confirms: the model gets 0/128 correct for large gold answers (31, 65, 91, 119) but 80-100/128 correct for gold=2, 3, 4.
+
+### Conclusion: Process+Outcome Is the Right Primary Metric
+
+Outcome-only conflates genuine reasoning with lucky answer-format overlap. Process+outcome with the fixed scorer is stricter but honest: it confirms the model actually computed the right thing for the right reasons. The fixed scorer already tolerates variable-name collapse and phantom variables (the four fixes above), so the remaining failures are genuine reasoning breakdowns: wrong values, missing dependency edges, or missing computation steps entirely.
+
+For ID ops (2-10), the fixed process scorer and outcome-only largely agree (both near 1.0 at pass@128). The gap only opens at OOD, which is exactly where scoring integrity matters most. We use process+outcome as the primary metric throughout.
+
+Scripts created for this analysis:
+- `scripts/gsm_infinity_ft_410m/rescore_outcome_only.py`: Re-score saved generations with outcome-only (batch mode)
+- `scripts/gsm_infinity_ft_410m/plot_id_vs_ood.py`: Generates comparison plots
+- `scripts/gsm_infinity_ft_410m/eval_ar_checkpoints_pass128.sh`: Parallel AR eval, 8 checkpoints, all ops, pass@128
+
+---
+
+## Next Steps
+
+### Immediate (unblock the comparison)
+
+1. **Complete AR 410M eval** with `--save_generations` on all ops 2-20, pass@128. Script ready at `scripts/gsm_infinity_ft_410m/eval_ar_checkpoints_pass128.sh`. This is the single most important gap -- no fair comparison exists without it.
+
+2. **Re-run AR eval with outcome-only re-scoring** on the saved AR traces. Even though process+outcome is the primary metric, having outcome-only for AR lets us verify the scoring gap is diffusion-specific (AR should show process+outcome ~ outcome-only, confirming the process scorer is not the problem for AR).
+
+3. **Complete BD3LM 2-epoch run and eval**. Already training. Eval with process+outcome on all ops 2-20.
+
+### Improve dLLM process+outcome scores (the core problem)
+
+The fundamental issue is that process+outcome drops sharply after op=10 for BD3LM. To show the hypothesis, we need dLLM OOD process+outcome to degrade slower than AR. Concrete approaches:
+
+4. **Increase block_size to 64 or 128.** The variable-name collapse analysis showed the issue is within-block parallel denoising. Larger blocks mean more of the solution is generated with prior context committed. A step is ~20-25 tokens, so block_size=64 fits 2-3 full steps per block, potentially fixing cross-step symbolic consistency. Cost: ~2x memory per batch (from doubled concat length), so halve per-device batch. Worth trying at 410M.
+
+5. **More diffusion steps at eval time.** Current eval uses steps=64. The model may need more refinement iterations to coordinate symbolic tokens at high ops. Try steps=128, 256 on a few OOD checkpoints. This is cheap (eval-only, no retraining).
+
+6. **Self-consistency / majority voting.** Generate 128 samples, group by extracted answer, take the majority answer. This leverages the model's ability to get the right answer sometimes even when process fails. Unlike outcome-only scoring, it doesn't require gold -- it's a legitimate inference strategy. Compare majority@128 vs pass@128 for dLLM and AR.
+
+7. **Constrained decoding for variable names.** At each "Define ... as X" position, constrain the sampler to output a variable letter not yet used. This surgically fixes the variable-collapse problem without changing the model or training. Implementation: track assigned variables during block-by-block generation, mask logits at variable-assignment positions. Only works for BD3LM (has left-to-right block structure), not MDLM.
+
+8. **Progressive block-size schedule (LLaDA 2.0 style).** Start with a small block_size (e.g., 8 or 16) and increase it over training, or use a coarse-to-fine schedule at inference: first denoise the full sequence with large blocks to get the global structure (answer magnitude, step count, entity names), then refine with smaller blocks for local consistency (variable letters, cross-references). This directly addresses the failure mode: the model gets the global computation right but fails at local symbolic coordination. A progressive schedule lets the model allocate more refinement budget to the hard tokens. Can be applied at eval time without retraining (vary block_size across denoising passes) or during training (curriculum on block_size).
+
+### Scale up if 410M comparison is inconclusive
+
+8. **Pythia-1.4B BD3LM.** A2D conversion already on disk. The 160M->410M jump improved BD3LM process+outcome substantially (op=10: 0.045 -> 0.545). Another 3.5x may push OOD process+outcome into the range where the comparison with AR is clear.
+
+9. **Pack the data.** No-pack wastes ~84% of each sequence on padding (avg 317 / max 2048). Packing would give ~6x throughput, enabling 2 epochs in the time of 1/3 epoch. Requires modifying BD3LM's block-diagonal attention mask to handle packed boundaries, but the MDLM trainer already supports packing.
+
+10. **30B token dataset.** Run `precache_data.py --token_budget 30B` on existing raw data (~59B tokens available). Larger models may saturate on 6.1B tokens -- more data ensures the comparison isn't bottlenecked by data.
+
+### Alternative experimental designs
+
+11. **Use a task where answers are not small integers.** GSM-Infinity's answer distribution skews toward 2, 3, 4 at high ops, creating noise for any metric. Consider a variant with uniformly distributed answers, or a different compositional reasoning task (e.g., logical deduction, multi-hop QA with string answers).
+
+12. **Train on higher ops (e.g., 2-15) and test on 16-25.** This shifts the ID/OOD boundary so the model has more training signal for multi-step reasoning. If dLLMs generalize better, the effect should be visible regardless of where the boundary is.
+
+13. **Compare learning curves, not just final checkpoints.** Plot pass@128 (process+outcome) vs training tokens for both AR and BD3LM at each op level. If dLLMs learn OOD structure faster per token, that supports the hypothesis even if final accuracy is similar.
 
