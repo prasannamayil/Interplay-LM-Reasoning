@@ -570,3 +570,85 @@ The fundamental issue is that process+outcome drops sharply after op=10 for BD3L
 
 14. **Compare learning curves, not just final checkpoints.** Plot pass@128 (process+outcome) vs training tokens for both AR and BD3LM at each op level. If dLLMs learn OOD structure faster per token, that supports the hypothesis even if final accuracy is similar.
 
+---
+
+## Progressive Block-Size Schedule (1 → 16 → 32 → 64)
+
+### Motivation
+
+LLaDA 2.0 describes a Warmup-Stable-Decay schedule on block size when converting AR models to diffusion. The idea: start near-AR (small blocks) to leverage pretrained weights, then progressively increase block_size so the model learns wider parallel-denoising windows. Applied to GSM finetuning where fixed bs=32 gets 38% pass@1 ID.
+
+### Schedule
+
+| Phase | Steps | Block Size | Cumulative |
+| ----- | ----- | ---------- | ---------- |
+| 1 | 4K | 1 (exact AR) | 4K |
+| 2 | 6K | 16 | 10K |
+| 3 | 18K | 32 (proven) | 28K |
+| 4 | 10K | 64 | 38K (1 epoch) |
+
+Each phase is a fresh training run loading weights from the previous phase's `checkpoint-final`. Same total compute as baseline (38K steps = 1 epoch = ~6.1B tokens).
+
+Script: `scripts/gsm_infinity_ft_410m/run_bd3lm_progressive.sh`
+
+### Results: Progressive vs Fixed bs=32 Baseline
+
+All checkpoints evaluated at block_size=32, steps=64, pass@128.
+
+| Cum. steps | Progressive ID@1 / ID@128 | Baseline ID@1 / ID@128 | Prog OOD@128 | Base OOD@128 |
+| ---------- | ------------------------- | ---------------------- | ------------ | ------------ |
+| ~14K | 0.337 / 0.747 | 0.360 / 0.766 | 0.066 | 0.064 |
+| ~20K | 0.344 / 0.758 | 0.378 / 0.784 | 0.079 | 0.080 |
+| ~24K | 0.353 / 0.776 | 0.393 / 0.792 | 0.093 | 0.099 |
+| ~28K | 0.349 / 0.758 | 0.389 / 0.796 | 0.098 | 0.114 |
+| ~38K (final) | 0.349 / 0.770 | 0.399 / 0.784 | 0.099 | 0.125 |
+
+**Verdict: Progressive is worse than baseline on both ID and OOD.** The phase 1 (bs=1) checkpoint produces **0% accuracy** when evaluated at bs=32 — the model trained at block_size=1 (exact causal attention) learns representations incompatible with block_size=32 inference (bidirectional within blocks). The bs=16 phase partially recovers but the model never catches up to the baseline that spent all its compute at bs=32.
+
+Phase 4 (bs=64) was neutral — `cum28k` and `cum38k` are tied, suggesting the larger block size neither helped nor hurt after the bs=32 phase.
+
+### Key Finding: Block-Size Transfer Failure
+
+Block_size=1 training does not transfer to block_size=32 inference at all. At bs=1, the BD3LM attention mask degenerates to strict token-level causal attention (each token is its own block). The model learns AR-like representations where each position only conditions on prior tokens. At bs=32 inference, positions within a block attend bidirectionally — a fundamentally different attention pattern the model never saw during bs=1 training.
+
+---
+
+## Diffusion Steps Ablation: More Steps = Substantially Better
+
+The existing diffusion steps ablation (BD3LM-bs32, checkpoint-30000) shows a clear trend:
+
+| Steps | ID@1 | ID@128 | OOD@128 | op=10 @128 | op=15 @128 |
+| ----- | ---- | ------ | ------- | ---------- | ---------- |
+| 8 | 0.546 | 0.803 | 0.005 | 0.435 | 0.010 |
+| 64 | 0.567 | 0.843 | 0.030 | 0.540 | 0.060 |
+| 128 | 0.573 | 0.852 | 0.043 | 0.575 | 0.085 |
+| 256 | 0.586 | 0.882 | 0.093 | 0.660 | 0.175 |
+| 512 | 0.645 | 0.902 | 0.170 | 0.730 | 0.330 |
+
+Going from 64 → 512 steps: ID@1 +14%, OOD@128 5.7x improvement. With 512 steps and block_size=32, each step unmasks at most 1 token (32 positions, ~102 steps per block), making within-block generation effectively sequential. This confirms the model's latent representations encode the correct answer — the bottleneck is in how parallel unmasking decodes those representations into discrete tokens.
+
+### Unmasking Schedule Details
+
+With the linear alpha scheduler and block_size=32:
+
+| steps_per_block | Tokens per step | Effective behavior |
+| --------------- | --------------- | ------------------ |
+| 4 | 8 | Very parallel, 4 steps to fill block |
+| 13 (default at steps=64) | 2-3 | Moderate parallelism |
+| 32+ | 1 | Sequential within block |
+
+The current default `remasking=low_confidence` commits the highest P(top-1) positions first. Variable-letter positions (the source of phantom variables) tend to have moderate confidence (~0.3) — similar across different variable positions — so they often get committed simultaneously in the same step, all resolving to the same high-frequency letter.
+
+### Remasking Strategy Ablation
+
+Added `prob_margin` and `left_to_right` remasking strategies to the BD3LM and MDLM samplers, matching the DUEL unmasking rules already implemented in `dllm/core/eval/`:
+
+| Strategy | Confidence score | Hypothesis for phantom variables |
+| -------- | ---------------- | -------------------------------- |
+| `low_confidence` | P(top-1) | Current default. Variable positions have moderate confidence → committed together → same letter |
+| `prob_margin` | P(top-1) − P(top-2) | Variable positions have flat distributions (low margin) → demasked **last** after context is committed → better coordination |
+| `left_to_right` | Position index (leftmost first) | Mimics AR order within block — earlier variables committed before later ones |
+| `random` | Uniform random | Baseline control |
+
+Script: `scripts/gsm_infinity_ft_410m/run_ablation_remasking.sh` (4 strategies × 2 step counts = 8 jobs, 1 per GPU)
+

@@ -238,6 +238,7 @@ def evaluate(
     block_size_mdlm: int = 256,
     block_size_bd3lm: int = 16,
     temperature: float = 0.0,
+    remasking: str = "low_confidence",
     op_levels: list[int] | None = None,
     device: str = "cuda",
     save_generations: bool = False,
@@ -271,7 +272,7 @@ def evaluate(
                 steps=steps,
                 block_size=block_size_mdlm,
                 temperature=temperature,
-                remasking="low_confidence",
+                remasking=remasking,
             )
         elif sampler_type == "bd3lm":
             sampler = BD3LMSampler(model=model, tokenizer=tokenizer)
@@ -280,7 +281,7 @@ def evaluate(
                 steps=steps,
                 block_size=block_size_bd3lm,
                 temperature=temperature,
-                remasking="low_confidence",
+                remasking=remasking,
             )
         else:
             raise ValueError(f"Unknown sampler type: {sampler_type}")
@@ -517,6 +518,11 @@ def main():
         help="Device to use (default: cuda)",
     )
     parser.add_argument(
+        "--remasking", type=str, default="low_confidence",
+        choices=["low_confidence", "prob_margin", "left_to_right", "random"],
+        help="Remasking strategy: low_confidence (greedy), prob_margin, left_to_right, random",
+    )
+    parser.add_argument(
         "--save_generations", action="store_true", default=False,
         help="Save generated text in detail files (for debugging)",
     )
@@ -539,6 +545,7 @@ def main():
         block_size_mdlm=args.block_size_mdlm,
         block_size_bd3lm=args.block_size_bd3lm,
         temperature=args.temperature,
+        remasking=args.remasking,
         op_levels=op_levels,
         device=args.device,
         save_generations=args.save_generations,

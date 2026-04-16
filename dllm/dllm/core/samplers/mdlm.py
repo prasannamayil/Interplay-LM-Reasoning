@@ -199,6 +199,12 @@ class MDLMSampler(BaseSampler):
                     x0_p = torch.squeeze(
                         torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1
                     )  # [B, T] confidence of predicted token
+                elif remasking == "prob_margin":
+                    p = F.softmax(logits, dim=-1)
+                    top2 = p.topk(2, dim=-1).values  # [B, T, 2]
+                    x0_p = top2[:, :, 0] - top2[:, :, 1]  # [B, T]
+                elif remasking == "left_to_right":
+                    x0_p = -torch.arange(T, device=x0.device, dtype=torch.float).unsqueeze(0).expand(B, -1)
                 elif remasking == "random":
                     x0_p = torch.rand(
                         (x0.shape[0], x0.shape[1]), device=x0.device
@@ -388,6 +394,12 @@ class MDLMSampler(BaseSampler):
                     x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(
                         -1
                     )  # [B, T]
+                elif remasking == "prob_margin":
+                    p = F.softmax(logits, dim=-1)
+                    top2 = p.topk(2, dim=-1).values  # [B, T, 2]
+                    x0_p = top2[:, :, 0] - top2[:, :, 1]  # [B, T]
+                elif remasking == "left_to_right":
+                    x0_p = -torch.arange(T, device=self.model.device, dtype=torch.float).unsqueeze(0).expand(B, -1)
                 elif remasking == "random":
                     x0_p = torch.rand((B, T), device=self.model.device)
                 else:

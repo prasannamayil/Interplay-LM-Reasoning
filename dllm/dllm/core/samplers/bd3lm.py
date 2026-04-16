@@ -107,10 +107,20 @@ def _diffusion_step_block(
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
     x0 = torch.argmax(logits_with_noise, dim=-1)  # [B, L]
 
-    # Confidence
+    # Confidence scoring: determines which positions to commit vs remask.
+    #   low_confidence  = top-1 probability (greedy confidence)
+    #   prob_margin     = top-1 minus top-2 probability (margin)
+    #   left_to_right   = leftmost masked positions first
+    #   random          = uniform random
     if remasking == "low_confidence":
         p = F.softmax(logits, dim=-1)
         x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)  # [B, L]
+    elif remasking == "prob_margin":
+        p = F.softmax(logits, dim=-1)
+        top2 = p.topk(2, dim=-1).values  # [B, L, 2]
+        x0_p = top2[:, :, 0] - top2[:, :, 1]  # [B, L]
+    elif remasking == "left_to_right":
+        x0_p = -torch.arange(L, device=device, dtype=torch.float).unsqueeze(0).expand(B, -1)
     elif remasking == "random":
         x0_p = torch.rand((B, L), device=device)
     else:
