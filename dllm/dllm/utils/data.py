@@ -76,6 +76,88 @@ def tokenize_and_group(
     }
 
 
+def _find_subseq(seq: list, pattern: list) -> int:
+    """Return index of first occurrence of *pattern* in *seq*, or -1."""
+    plen = len(pattern)
+    for i in range(len(seq) - plen + 1):
+        if seq[i : i + plen] == pattern:
+            return i
+    return -1
+
+
+def tokenize_and_group_masked(
+    examples,
+    tokenizer,
+    text_field: str = "text",
+    seq_length: int = 1024,
+    insert_eos: bool = False,
+    drop_tail: bool = True,
+    add_special_tokens: bool = False,
+    mask_boundary_ids: list[int] | None = None,
+):
+    """
+    Tokenize, apply per-example prompt masking, then pack into fixed-length chunks.
+
+    Like ``tokenize_and_group`` but builds masked ``labels`` (with -100 for
+    prompt tokens) **before** concatenation so that prompt boundaries are
+    preserved through packing.
+
+    WARNING: Still packs multiple examples into single sequences.
+    For models with block-diagonal attention (e.g. BD3LM), use
+    ``tokenize_individual`` instead.
+
+    Args:
+        examples: Batch of examples with text field.
+        tokenizer: Tokenizer to use.
+        text_field: Name of the text field in examples.
+        seq_length: Target sequence length for chunks.
+        insert_eos: If True, append EOS token to each text sample.
+        drop_tail: If True, drop incomplete final chunk; if False, keep it.
+        add_special_tokens: Whether to add special tokens during tokenization.
+        mask_boundary_ids: Token-id subsequence that marks the start of the
+            trainable region (e.g. the ids for ``" <solution>"``).  All tokens
+            before the first occurrence are masked with -100 in labels.
+            If *None*, labels are an unmasked copy of input_ids (same as
+            ``tokenize_and_group``).
+
+    Returns:
+        Dictionary with input_ids and labels as lists of token sequences.
+    """
+    tokenized = tokenizer(examples[text_field], add_special_tokens=add_special_tokens)
+    ids = tokenized["input_ids"]
+
+    if insert_eos:
+        eos_id = getattr(tokenizer, "eos_token_id")
+        assert eos_id is not None, "tokenizer has no eos_token_id"
+        ids = [seq + ([] if (seq and seq[-1] == eos_id) else [eos_id]) for seq in ids]
+
+    all_labels: list[list[int]] = []
+    for seq in ids:
+        labs = seq[:]
+        if mask_boundary_ids:
+            boundary = _find_subseq(seq, mask_boundary_ids)
+            if boundary > 0:
+                labs[:boundary] = [-100] * boundary
+        all_labels.append(labs)
+
+    concat_ids = list(chain.from_iterable(ids))
+    concat_labels = list(chain.from_iterable(all_labels))
+    if not concat_ids:
+        return {"input_ids": [], "labels": []}
+
+    if drop_tail:
+        total_len = (len(concat_ids) // seq_length) * seq_length
+        concat_ids = concat_ids[:total_len]
+        concat_labels = concat_labels[:total_len]
+    else:
+        total_len = len(concat_ids)
+
+    chunks_ids = [concat_ids[i : i + seq_length] for i in range(0, total_len, seq_length)]
+    chunks_labels = [concat_labels[i : i + seq_length] for i in range(0, total_len, seq_length)]
+
+    return {"input_ids": chunks_ids, "labels": chunks_labels}
+
+
 def tokenize_individual(
     examples,
     tokenizer,

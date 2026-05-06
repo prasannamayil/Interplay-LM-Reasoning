@@ -25,6 +25,7 @@ from .data import (
     post_process_dataset_streaming,
     prepend_bos,
     tokenize_and_group,
+    tokenize_and_group_masked,
     tokenize_individual,
 )
 from .models import get_model, get_tokenizer
@@ -82,6 +83,7 @@ __all__ = [
     "post_process_dataset_streaming",
     "prepend_bos",
     "tokenize_and_group",
+    "tokenize_and_group_masked",
     "tokenize_individual",
     # models
     "get_model",

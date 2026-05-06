@@ -88,7 +88,15 @@ def main():
     parser.add_argument("--no_pack", action="store_true",
                         help="Tokenize each example individually instead of packing "
                              "multiple examples into fixed-length chunks.")
+    parser.add_argument("--pack_masked", action="store_true",
+                        help="Pack into fixed-length chunks with per-example prompt "
+                             "masking preserved (labels=-100 before <solution>). "
+                             "Combines packing efficiency with SFT-style masking. "
+                             "Mutually exclusive with --no_pack.")
     args = parser.parse_args()
+
+    if args.no_pack and args.pack_masked:
+        parser.error("--no_pack and --pack_masked are mutually exclusive")
 
     if os.path.isfile(os.path.join(args.output_dir, "dataset_dict.json")):
         print(f"Output already exists at {args.output_dir}, skipping.")
@@ -152,6 +160,16 @@ def main():
             seq_length=args.seq_length, insert_eos=True,
         )
         desc = "Tokenizing individually (no packing)"
+    elif args.pack_masked:
+        sol_boundary_ids = tokenizer.encode(" <solution>", add_special_tokens=False)
+        print(f"Pack-masked mode: boundary ids for ' <solution>' = {sol_boundary_ids}")
+        tokenize_fn = functools.partial(
+            dllm.utils.tokenize_and_group_masked,
+            tokenizer=tokenizer, text_field="text",
+            seq_length=args.seq_length, insert_eos=True, drop_tail=True,
+            mask_boundary_ids=sol_boundary_ids,
+        )
+        desc = "Tokenizing, masking prompts, and packing (pack_masked)"
     else:
         tokenize_fn = functools.partial(
             dllm.utils.tokenize_and_group,

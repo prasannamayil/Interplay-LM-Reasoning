@@ -310,6 +310,48 @@ def evaluate(
 
     for op in sorted(data_by_op.keys()):
         examples = data_by_op[op]
+
+        details_path = os.path.join(output_dir, f"details_op{op}.json")
+        if os.path.isfile(details_path):
+            try:
+                with open(details_path) as f:
+                    cached = json.load(f)
+                cached_details = cached.get("sample_details", [])
+                cached_successes = [
+                    (d["n_samples"], d["n_correct"]) for d in cached_details
+                    if "n_samples" in d and "n_correct" in d
+                ]
+                if cached_successes and len(cached_successes) == len(examples):
+                    op_metrics = {}
+                    for k in k_values:
+                        pass_k_values = [
+                            compute_pass_at_k(s, n, k) for n, s in cached_successes
+                        ]
+                        op_metrics[f"pass@{k}"] = float(np.mean(pass_k_values))
+                    mean_reward = float(np.mean([s / n for n, s in cached_successes]))
+                    std_reward = float(np.std([s / n for n, s in cached_successes]))
+                    prefix = f"val-core/difficulty-5B/{op}/reward"
+                    all_metrics[f"{prefix}/mean@{n_samples}"] = mean_reward
+                    all_metrics[f"val-aux/difficulty-5B/{op}/reward/std@{n_samples}"] = std_reward
+                    for k in k_values:
+                        all_metrics[f"val-aux/difficulty-5B/{op}/reward/pass@{k}"] = (
+                            op_metrics[f"pass@{k}"]
+                        )
+                    print(
+                        f"[RESUME] op={op}: loaded {len(cached_successes)} cached examples "
+                        f"from {details_path} | pass@1={op_metrics.get('pass@1', 0):.4f}, "
+                        f"pass@{k_values[-1]}={op_metrics.get(f'pass@{k_values[-1]}', 0):.4f}"
+                    )
+                    continue
+                else:
+                    print(
+                        f"[RESUME] op={op}: cached file has "
+                        f"{len(cached_successes)} examples but expected {len(examples)} "
+                        f"-- re-running this op"
+                    )
+            except (OSError, json.JSONDecodeError, KeyError) as e:
+                print(f"[RESUME] op={op}: failed to load {details_path} ({e}) -- re-running")
+
         print(f"\n{'='*60}")
         print(f"Evaluating op={op} ({len(examples)} examples, {n_samples} samples each)")
         print(f"{'='*60}")

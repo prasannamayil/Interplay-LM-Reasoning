@@ -71,6 +71,8 @@ def main():
     parser.add_argument("--no_fsdp", action="store_true", default=False)
     parser.add_argument("--mask_prompt_loss", action="store_true", default=False,
                         help="Mask labels for <question>...</question> prompt tokens")
+    parser.add_argument("--group_by_length", action="store_true", default=False,
+                        help="Group similar-length sequences into batches to reduce padding")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
@@ -125,6 +127,7 @@ def main():
             "fsdp": "full_shard auto_wrap",
             "fsdp_config": {"fsdp_transformer_layer_cls_to_wrap": "GPTNeoXLayer"},
         }),
+        group_by_length=args.group_by_length,
         gradient_checkpointing=True,
         dataloader_num_workers=4,
         remove_unused_columns=False,

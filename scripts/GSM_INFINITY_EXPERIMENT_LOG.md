@@ -550,7 +550,7 @@ The fundamental issue is that process+outcome drops sharply after op=10 for BD3L
 
 6. **~~Mask synthetic EOS padding in diffusion loss.~~** DONE (Bug 6). Fixed repo-wide: `AppendEOSBlockWrapper` pads labels with `-100`; all GSM and SFT collators use `label_pad_token_id=-100`. The single real EOS per example remains supervised. All existing 410M checkpoints were trained with the old (supervised padding) setup; new runs will use the fix. Expect higher reported loss (more meaningful) and better gradient allocation to reasoning tokens.
 
-7. **Pack the data.** No-pack wastes ~84% of each sequence on padding (avg 317 / max 2048). Packing gives ~6x throughput, enabling 2 epochs in the time of 1/3 epoch. The MDLM trainer already supports packing. For BD3LM, requires modifying the block-diagonal attention mask to handle packed sequence boundaries -- non-trivial but high payoff for training efficiency.
+7. **~~Reduce max_length to 1184.~~** APPLIED (see §"Sequence-length audit and max_length reduction" below). `run_bd3lm_bs32_2epoch.sh` now trains at `max_length=1184` covering 100% of training examples with zero truncation. Projected ~2.5x training speedup (60h → 25-30h for 76K steps). Supersedes packing for this run; packing still on the table for 3+ epoch / bigger model runs.
 
 8. **Constrained decoding for variable names.** At each "Define ... as X" position, constrain the sampler to output a variable letter not yet used. This surgically fixes the variable-collapse problem without changing the model or training. Implementation: track assigned variables during block-by-block generation, mask logits at variable-assignment positions. Only works for BD3LM (has left-to-right block structure), not MDLM.
 
@@ -651,4 +651,76 @@ Added `prob_margin` and `left_to_right` remasking strategies to the BD3LM and MD
 | `random` | Uniform random | Baseline control |
 
 Script: `scripts/gsm_infinity_ft_410m/run_ablation_remasking.sh` (4 strategies × 2 step counts = 8 jobs, 1 per GPU)
+
+---
+
+## Sequence-Length Audit and max_length Reduction
+
+### Motivation
+
+Earlier BD3LM runs trained at `max_length=2048` because that was the config default, but the raw data is no-pack variable-length with avg 317 tokens (see "Critical Data Insight: No-Pack Kills Throughput" above). Attention in BD3LM is O(L²) over the concatenated `x_t || x_0`, i.e., 2L positions, so padding up to 2048 is extremely wasteful when real examples are ~300 tokens.
+
+Before committing to real packing (non-trivial engineering for BD3LM's 3-component block mask), measured the actual length distribution to see if a smaller `max_length` cap alone would capture most of the speedup without any training-data loss.
+
+### Script
+
+`scripts/gsm_infinity_ft_410m/measure_seq_lengths.py` — two passes on CPU:
+- **Pass A**: per-example length across all 19.3M training examples in `composition_hf_dllm_10B_nopack_pythia_masked`.
+- **Pass B**: per-op 2-20 gold-solution lengths in `test_small/`, tokenized with the Pythia tokenizer to match training formatting.
+
+Output: `results/gsm_infinity_ft_410m/seq_length_stats.json` + stdout table.
+
+### Findings
+
+**Training data (ops 2-10, n=19,322,174)**:
+
+| percentile | full input_ids | trainable tokens (labels != -100) |
+| ---------- | -------------- | --------------------------------- |
+| mean | 316 | 150 |
+| p50 | 300 | 147 |
+| p90 | 477 | 255 |
+| p99 | 666 | 302 |
+| p99.9 | 826 | 325 |
+| p99.99 | 943 | 339 |
+| **p100** | **1173** | **362** |
+
+Only **251 / 19.3M examples (0.0013%)** exceed 1024 tokens. Hard ceiling is 1173.
+
+**Test data (ops 2-20, 200 examples per op)**, gen-only (solution+answer, i.e. what the model has to emit):
+
+| op | p50 | p90 | p99 | p100 | prompt p100 | full p100 |
+| --- | --- | --- | --- | --- | ----------- | --------- |
+| 2 | 57 | 151 | 156 | 157 | 414 | 466 |
+| 5 | 96 | 206 | 225 | 228 | 498 | 604 |
+| 10 | 254 | 299 | 316 | 324 | 621 | 803 |
+| 15 | 249 | 397 | 428 | 449 | 615 | 1026 |
+| 20 | 380 | 492 | 518 | **546** | 509 | 890 |
+
+Max across **all** ops:
+- gen-only p100 = 546 (at op=20)
+- prompt p100 = 626 (at op=9)
+- full p100 = 1026 (at op=15)
+
+### Fairness check: AR's effective training context
+
+`scripts/gsm_infinity_ft/finetune_pythia_ar.py` uses `DataCollatorForSeq2Seq(tokenizer, padding=True, ...)` with no `max_length` argument. AR training thus dynamically pads to the longest-in-batch, bounded above by the data itself (1173 tokens). AR never used positions above ~1173 during finetuning either, despite Pythia's 2048 pretraining context. Training BD3LM at `max_length=1184` matches AR's effective context exactly.
+
+### Recommendation applied
+
+In `scripts/gsm_infinity_ft_410m/run_bd3lm_bs32_2epoch.sh`:
+
+- `--max_length 1184` (was 2048) — covers the full p100=1173 with one block of headroom, rounded to a multiple of `block_size=32`. **Zero truncation.**
+- `--gradient_checkpointing True` kept for safety on the first run; can be flipped to `False` for another ~1.3x speedup after a 50-step OOM sanity check.
+- Eval `--max_new_tokens 1024` unchanged (well above gen-only p100=546; fair vs AR which also uses 1024).
+
+Projected step-time change:
+- Attention FLOPs scale as L² (concatenated 2L in BD3LM). 1184 vs 2048 → (1184/2048)² ≈ 0.33x. Non-attention ops scale linearly → 1184/2048 ≈ 0.58x. Realistic mix → ~0.4-0.5x of baseline step time.
+- Baseline: ~2.78s/step × 76K steps ≈ 60h train.
+- Projected: ~1.2-1.4s/step × 76K steps ≈ **25-30h train**.
+
+### Side benefits
+
+- `results/gsm_infinity_ft_410m/seq_length_stats.json` now serves as the authoritative length-distribution record for future config decisions.
+- Passing `--save_length_column` to the audit script produces `data/composition_hf_dllm_10B_nopack_pythia_masked_with_length/` where each row carries its `length`. Future `group_by_length=True` runs can use this column directly and skip the multi-hour length-scan that originally made `group_by_length` unusable on this dataset.
+- The gen-only p100=546 confirms `max_new_tokens=1024` at eval is generous but not wasteful enough to be worth reducing while preserving AR parity. Reducing both AR and BD3LM eval to e.g. 768 is a future ~1.3x eval speedup opportunity.
 

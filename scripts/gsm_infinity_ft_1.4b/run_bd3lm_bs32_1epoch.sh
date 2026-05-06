@@ -1,35 +1,64 @@
 #!/bin/bash
 # =============================================================================
-# BD3LM Pythia-410M (block_size=32): 2 epochs (76K steps) + 8-checkpoint eval
+# BD3LM Pythia-1.4B (block_size=32): half-epoch (20K steps) + 8-checkpoint eval
 # =============================================================================
-# Same as run_bd3lm_bs32.sh but 2 full epochs for extended training.
+# Sibling of run_bd3lm_bs32_2epoch.sh (410M). Scaled up to 1.4B, trained for
+# half an epoch (20K steps, ~3.2B tokens). The original 1-epoch plan projected
+# ~55h even with length-grouped sampling; per-step profiling showed <2% H100
+# utilization, i.e. step time was overhead-bound, not compute-bound. The real
+# overhead source was grad_accum=4 -> 4 forward+backward passes per step.
+# This config collapses that to 1 pass/step and pads the rest with workers:
+#   1. grad_accum 4 -> 1 (removes 3 wasted fwd+bwd per step, ~4x fewer
+#      DeepSpeed allreduce barriers and kernel-launch bubbles)
+#   2. per_device_batch 16 -> 64 (keeps effective batch at 512)
+#   3. gradient_checkpointing stays ON. We TRIED batch=32 + ckpt=OFF and OOM'd
+#      at the MLP+attn parallel-residual line: Pythia's parallel residual keeps
+#      mlp_output AND attn_output live simultaneously at b*2L*d plus the MLP
+#      intermediate at b*2L*4d, so 24 layers of saved activations is ~45 GB
+#      on top of a ~30 GB logits+grad tensor from the full 2L concat output.
+#      Keep ckpt=ON; the grad_accum=1 win dominates.
+#   4. dataloader_num_workers 4 (hides variable-length collate behind compute)
+# Combined with the already-landed LengthGroupedSampler fix in
+# BD3LMTrainer._get_train_sampler (group_by_length + --train_lengths_path),
+# the projected step time drops ~5.3s -> ~3.0-3.5s, and halving the schedule
+# to 20K steps brings total train wall time to ~17-20h.
 #
 # Training: accelerate ZeRO-2, 8 GPUs
-#   Batch: 64/GPU x 1 accum x 8 GPUs = 512 seqs/step
-#   Steps: 76,000 (~2 epochs, ~12.2B tokens)
-#   Saves: every 2,000 steps (19 checkpoints); eval 8 evenly spaced
+#   Batch: 64/GPU x 1 accum x 8 GPUs = 512 seqs/step (matches 410M 2-epoch)
+#   Steps: 20,000 (~0.5 epoch, ~3.2B tokens)
+#   Saves: every 2,500 steps (8 checkpoints); eval all 8 checkpoints
 #   Attn: sdpa (avoids flex_attention recompilation with variable-length data)
 #   max_length: 1184 (no-op for pre-tokenized data; kept for record).
 #   group_by_length: ON. BD3LMTrainer._get_train_sampler loads pre-computed
 #     integer lengths from --train_lengths_path (data/train_lengths.npy,
 #     ~74 MB) and builds a LengthGroupedSampler directly. Bypasses HF's
-#     default path which on 19.3M rows either scans every input_ids (hours)
-#     or reads a dataset 'length' column from Arrow on every DDP rank
-#     (Lustre I/O contention that hung prior attempts).
+#     default path which scans every input_ids (hours) or reads a dataset
+#     'length' column from Arrow on every DDP rank (I/O contention).
 #     See dllm/dllm/core/trainers/bd3lm.py::BD3LMTrainer._get_train_sampler.
-#   gradient_checkpointing: ON (kept from 1-epoch config). Tried OFF and hit
-#     OOM at cross_entropy: logits tensor alone is batch×seq×vocab×bf16 =
-#     64×2368×50257×2 = ~15GB, plus its gradient (~15GB) plus 24 layers of
-#     stored activations. Even at 80GB per GPU it overflows. Revert kept.
-#   Expected step time ~1.0-1.5s (~25-30h for 76K steps) vs previous ~2.78s
-#     with random batching padded to max-in-batch (~60h).
+#   gradient_checkpointing: ON. At batch=64/GPU the memory budget with ckpt=ON is:
+#       * saved hidden states: 24 * 64 * 2L * 2048 * 2B ~ 14 GB
+#       * logits + grad:       2 * 64 * 2L * 50257 * 2B ~ 30 GB (full concat out)
+#       * ZeRO-2 model state:  ~8 GB
+#       * one-layer recompute + overhead: ~8 GB
+#     = ~60 GB peak, fits comfortably in 80 GB. ckpt=OFF was tried at bs=32 and
+#     OOM'd at 78.89/79.18 GB; the Pythia parallel-residual block keeps mlp and
+#     attn outputs live simultaneously, burning 45+ GB of activations across 24
+#     layers. The grad_accum=4 -> 1 win is the dominant speedup lever anyway.
+#   dataloader_num_workers: 4 (hides variable-length collate + AppendEOSBlock
+#     wrapping of per-example tensors behind GPU compute).
+#   Expected step time ~2.5-3.5s (was ~5.3s). Total: ~17-20h for 20K steps.
+#
+# For further speedup: multi-node launch. Use SLURM or torchrun to go to
+# 2 nodes (16 GPUs, ~1.9x faster) or 4 nodes (32 GPUs, ~3.5x). Adjust
+# accelerate config and effective batch accordingly.
 #
 # Eval: 8 checkpoints in parallel (1 per GPU), all ops 2-20, pass@128
-#   Decoder: random remasking, 256 steps (winner of remasking ablation on
-#   1-epoch ckpt-30000; substantially better OOD than low_conf/64 default).
+#   Decoder: random remasking, 256 steps (ablation winner; substantially
+#     better OOD than low_conf/64). batch_size=32 (was 128 for 410M) to fit
+#     activations of 1.4B at 256 diffusion steps per block.
+#   Expected per-ckpt eval ~10-14h (much slower than 410M); 8 parallel.
 #
-# Total (projected): ~25-30h train + ~16-20h eval (random/256 is ~4x slower
-# than low_conf/64 at eval per ckpt, but the decoder gains on OOD justify it).
+# Total (projected): ~17-20h train + ~12h eval
 # =============================================================================
 
 set -euo pipefail
@@ -42,21 +71,19 @@ VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
 
 DATASET_PATH="${PROJECT_ROOT}/data/composition_hf_dllm_10B_nopack_pythia_masked"
 TRAIN_LENGTHS_NPY="${PROJECT_ROOT}/data/train_lengths.npy"
-A2D_DIR="${DLLM_ROOT}/.models/a2d/pythia-410m"
-OUTPUT_DIR="${PROJECT_ROOT}/results/gsm_infinity_ft_410m/pythia-410m-bd3lm-bs${BLOCK_SIZE}-2epoch"
+A2D_DIR="${DLLM_ROOT}/.models/a2d/pythia-1.4b"
+OUTPUT_DIR="${PROJECT_ROOT}/results/gsm_infinity_ft_1.4b/pythia-1.4b-bd3lm-bs${BLOCK_SIZE}-1epoch"
 
 export HF_HOME="${PROJECT_ROOT}/.hf_cache"
 export HF_DATASETS_CACHE="${PROJECT_ROOT}/.hf_cache/datasets"
-export WANDB_PROJECT="${WANDB_PROJECT:-gsm-infinity-ft-410m}"
+export WANDB_PROJECT="${WANDB_PROJECT:-gsm-infinity-ft-1.4b}"
 # wandb network from compute nodes is flaky -- bump init + http timeouts.
 # If wandb still fails, export WANDB_MODE=offline before launching and
 # `wandb sync` the run dir after the job is done.
 export WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-600}"
 export WANDB_HTTP_TIMEOUT="${WANDB_HTTP_TIMEOUT:-120}"
 export WANDB_START_METHOD="${WANDB_START_METHOD:-thread}"
-# Reduce memory fragmentation for BD3LM's dynamic shapes (variable-length
-# batches + varying mask sizes). Avoids surprise OOMs near the cross_entropy
-# at the end of the forward pass (large vocab × seq × batch logits tensor).
+# Reduce memory fragmentation for BD3LM's dynamic shapes.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 source "${VENV}"
@@ -64,18 +91,22 @@ export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH:-}"
 
 if [[ ! -f "${A2D_DIR}/config.json" ]]; then
     echo "Error: A2D model not found at ${A2D_DIR}"
-    echo "Run: bash scripts/gsm_infinity_ft_410m/run_bd3lm_bs32.sh (it auto-converts)"
+    echo "The A2D-converted Pythia-1.4B should already be on disk. Verify with:"
+    echo "  ls ${A2D_DIR}"
     exit 1
 fi
 if [[ ! -f "${DATASET_PATH}/dataset_dict.json" ]]; then
     echo "Error: Dataset not found at ${DATASET_PATH}"
     exit 1
 fi
+
 if [[ ! -f "${TRAIN_LENGTHS_NPY}" ]]; then
     echo "Error: pre-computed lengths file not found at ${TRAIN_LENGTHS_NPY}"
-    echo "Regenerate with scripts/gsm_infinity_ft_410m/measure_seq_lengths.py"
+    echo "  Needed for --group_by_length (see pt_bd3lm.py)."
     exit 1
 fi
+
+mkdir -p "$(dirname "${OUTPUT_DIR}")"
 
 if [[ -d "${OUTPUT_DIR}" ]]; then
     OLD="${OUTPUT_DIR}_old_$(date +%Y%m%d_%H%M%S)"
@@ -83,16 +114,16 @@ if [[ -d "${OUTPUT_DIR}" ]]; then
 fi
 
 # =========================================================================
-# Train: 76K steps = 2 epochs
+# Train: 20K steps = ~0.5 epoch
 # =========================================================================
 echo "============================================================"
-echo "Training BD3LM Pythia-410M (bs=${BLOCK_SIZE}, 2 epochs, 76K steps)"
+echo "Training BD3LM Pythia-1.4B (bs=${BLOCK_SIZE}, half-epoch, 20K steps)"
 echo "  Batch: 64/GPU x 1 accum x 8 GPUs = 512 seqs/step"
-echo "  Sampler: LengthGroupedSampler (pre-computed lengths)"
+echo "  Sampler: LengthGroupedSampler (pre-computed lengths npy)"
 echo "  LR: 5e-5, cosine, warmup 5%"
-echo "  Gradient checkpointing: ON, attn: sdpa"
-echo "  Save every 4K steps (19 checkpoints), eval 8 evenly spaced"
-echo "  Projected: ~25-30h (was ~60h with random batching)"
+echo "  Gradient checkpointing: ON, attn: sdpa, fused AdamW, 4 dataloader workers"
+echo "  Save every 2.5K steps (8 checkpoints)"
+echo "  Projected: ~17-20h (was ~55h at 16/4 accum)"
 echo "============================================================"
 
 cd "${DLLM_ROOT}"
@@ -106,7 +137,7 @@ accelerate launch \
     --max_length 1184 \
     --insert_eos True \
     --block_size ${BLOCK_SIZE} \
-    --max_steps 76000 \
+    --max_steps 20000 \
     --learning_rate 5e-5 \
     --weight_decay 0.1 \
     --lr_scheduler_type cosine \
@@ -117,37 +148,39 @@ accelerate launch \
     --bf16 True \
     --gradient_checkpointing True \
     --attn_implementation sdpa \
+    --optim adamw_torch_fused \
+    --dataloader_num_workers 4 \
+    --dataloader_pin_memory True \
     --logging_steps 10 \
-    --save_steps 4000 \
-    --save_total_limit 19 \
+    --save_steps 2500 \
+    --save_total_limit 8 \
     --eval_strategy "no" \
     --group_by_length True \
     --train_lengths_path "${TRAIN_LENGTHS_NPY}" \
     --report_to wandb \
-    --run_name "pythia-410m-bd3lm-bs${BLOCK_SIZE}-2epoch" \
+    --run_name "pythia-1.4b-bd3lm-bs${BLOCK_SIZE}-1epoch" \
     --output_dir "${OUTPUT_DIR}"
 
 echo "Training complete: ${OUTPUT_DIR}"
 
 # =========================================================================
 # Eval: 8 checkpoints in parallel, all ops 2-20, pass@128
-# Decoder: random remasking, 256 steps (from remasking-ablation winner on
-# ckpt-30000 of 1-epoch run; substantially better than default low_conf/64
-# at op>=10; see log "Remasking Strategy Ablation" and plot data).
-# Output tag `_pass128_random256` matches the 1-epoch scatter convention
-# in scripts/gsm_infinity_ft_410m/eval_id_ood_scatter.sh.
+# Decoder: random remasking, 256 steps (ablation winner on 410M ckpt-30000).
+# batch_size=32 (smaller than 410M's 128) because 1.4B is 3.4x larger.
+# Output tag `_pass128_random256` matches scatter plotting conventions.
 # =========================================================================
 echo ""
 echo "============================================================"
-echo "Evaluating 8 BD3LM checkpoints (parallel, random/256, ops 2-20)"
+echo "Evaluating 8 BD3LM-1.4B checkpoints (parallel, random/256, ops 2-20)"
 echo "============================================================"
 
-EVAL_BASE="${PROJECT_ROOT}/results/gsm_infinity_ft_410m/eval/pythia-410m-bd3lm-bs${BLOCK_SIZE}-2epoch"
+EVAL_BASE="${PROJECT_ROOT}/results/gsm_infinity_ft_1.4b/eval/pythia-1.4b-bd3lm-bs${BLOCK_SIZE}-1epoch"
 EVAL_SUFFIX="pass128_random256"
 
 cd "${DLLM_ROOT}"
 
-CHECKPOINTS=(8000 16000 28000 36000 48000 56000 68000 final)
+# 8 checkpoints spanning 20K steps. Aligned to save_steps=2500.
+CHECKPOINTS=(2500 5000 7500 10000 12500 15000 17500 final)
 GPUS=(0 1 2 3 4 5 6 7)
 PIDS=()
 
@@ -166,7 +199,7 @@ for i in "${!CHECKPOINTS[@]}"; do
         continue
     fi
 
-    echo "[GPU ${GPU}] Launching BD3LM checkpoint-${CKPT}"
+    echo "[GPU ${GPU}] Launching BD3LM-1.4B checkpoint-${CKPT}"
     mkdir -p "${OUT}"
 
     CUDA_VISIBLE_DEVICES=${GPU} python examples/gsm_infinity/eval_pass128.py \
@@ -175,7 +208,7 @@ for i in "${!CHECKPOINTS[@]}"; do
         --test_dir "${PROJECT_ROOT}/data/composition_hf/test_small" \
         --n_samples 128 \
         --output_dir "${OUT}" \
-        --batch_size 128 \
+        --batch_size 32 \
         --max_new_tokens 1024 \
         --steps 256 \
         --block_size_bd3lm ${BLOCK_SIZE} \
@@ -200,7 +233,7 @@ python3 -c "
 import json, os
 base = '${EVAL_BASE}'
 suffix = '${EVAL_SUFFIX}'
-for ckpt in ['8000','16000','28000','36000','48000','56000','68000','final']:
+for ckpt in ['2500','5000','7500','10000','12500','15000','17500','final']:
     mp = os.path.join(base, f'checkpoint-{ckpt}_{suffix}', 'metrics.jsonl')
     if not os.path.exists(mp):
         print(f'  ckpt={ckpt}: not available')

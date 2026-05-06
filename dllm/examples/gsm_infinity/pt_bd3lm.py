@@ -429,6 +429,46 @@ def train():
                     desc=f"Masking prompt labels ({split_name})",
                 )
 
+    # ----- Wire pre-computed lengths into BD3LMTrainer sampler ------------------
+    # BD3LMTrainer._get_train_sampler reads train_lengths_path directly to build
+    # a LengthGroupedSampler without touching the Arrow dataset on every rank.
+    # We auto-detect the conventional path {dataset_args}/../train_lengths.npy
+    # if the user did not pass --train_lengths_path explicitly.
+    if training_args.group_by_length:
+        if not training_args.train_lengths_path:
+            default_lengths_npy = os.path.join(
+                os.path.dirname(data_args.dataset_args), "train_lengths.npy",
+            )
+            if os.path.isfile(default_lengths_npy):
+                training_args.train_lengths_path = default_lengths_npy
+                logger.info(
+                    f"Auto-detected train_lengths_path={default_lengths_npy}"
+                )
+        if training_args.train_lengths_path and os.path.isfile(
+            training_args.train_lengths_path
+        ):
+            import numpy as _np
+            _lengths = _np.load(training_args.train_lengths_path, mmap_mode="r")
+            if len(_lengths) != len(dataset["train"]):
+                raise ValueError(
+                    f"train_lengths_path has {len(_lengths)} entries but "
+                    f"train_dataset has {len(dataset['train'])} examples."
+                )
+            logger.info(
+                f"group_by_length: using pre-computed lengths "
+                f"({training_args.train_lengths_path}, "
+                f"n={len(_lengths)}, min={int(_lengths.min())}, "
+                f"max={int(_lengths.max())})"
+            )
+        else:
+            logger.warning(
+                "group_by_length=True but no train_lengths_path and no default "
+                "train_lengths.npy found next to dataset. HF will fall back to "
+                "scanning every example to compute lengths (very slow on large "
+                "datasets). Pre-compute lengths with e.g. "
+                "scripts/gsm_infinity_ft_410m/measure_seq_lengths.py."
+            )
+
     # ----- Training ---------------------------------------------------------------
     accelerate.PartialState().wait_for_everyone()
     logger.info("Start BD3LM training...")
