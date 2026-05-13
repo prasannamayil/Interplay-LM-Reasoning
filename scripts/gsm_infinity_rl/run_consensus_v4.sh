@@ -79,27 +79,32 @@ T0=$(date +%s)
 #
 # Each entry: <new_run_name>|<base_config_name>|<reward_fn_name>|<extra_kw>
 #   - reward_fn_name : one of
-#       compute_score_consensus_only       (pure cons reward, no outcome gate)
-#       compute_score_consensus_outcome    (outcome * (1 + gamma*cons))
-#       compute_score_consensus_blend      ((1-alpha)*outcome + alpha*cons)
+#       compute_score_consensus_only_batched      (pure cons reward, no gate)
+#       compute_score_consensus_outcome_batched   (outcome * (1 + gamma*cons))
+#       compute_score_consensus_blend_batched     ((1-alpha)*outcome + alpha*cons)
 #   - extra_kw       : optional Hydra override appended verbatim, e.g.
 #                      "+custom_reward_function.reward_kwargs.gamma=0.5"
+#
+# All consensus rewards REQUIRE the batch reward manager (we override
+# `reward_model.reward_manager=batch` below). The batch manager passes
+# all sibling rollouts in a single call so cons_nc can be computed
+# across the K=6 rollouts per prompt at training time.
 # -----------------------------------------------------------------------------
 if [ "$WHICH" = "followups" ]; then
     RUNS=(
-        "grpo_id_v4_consensus|grpo_id_v4|compute_score_consensus_only|"
-        "dr_gspo_edge_v4_consensus|dr_gspo_edge_v4|compute_score_consensus_only|"
-        "dr_gspo_hard_v4_consensus|dr_gspo_hard_v4|compute_score_consensus_only|"
-        "grpo_edge_v4_consensus_g05|grpo_edge_v4|compute_score_consensus_outcome|+custom_reward_function.reward_kwargs.gamma=0.5"
-        "grpo_uniform_v4_consensus_g05|grpo_uniform_v4|compute_score_consensus_outcome|+custom_reward_function.reward_kwargs.gamma=0.5"
-        "grpo_hard_v4_consensus_g05|grpo_hard_v4|compute_score_consensus_outcome|+custom_reward_function.reward_kwargs.gamma=0.5"
-        "grpo_edge_v4_consensus_a05|grpo_edge_v4|compute_score_consensus_blend|+custom_reward_function.reward_kwargs.alpha=0.5"
+        "grpo_id_v4_consensus|grpo_id_v4|compute_score_consensus_only_batched|"
+        "dr_gspo_edge_v4_consensus|dr_gspo_edge_v4|compute_score_consensus_only_batched|"
+        "dr_gspo_hard_v4_consensus|dr_gspo_hard_v4|compute_score_consensus_only_batched|"
+        "grpo_edge_v4_consensus_g05|grpo_edge_v4|compute_score_consensus_outcome_batched|+custom_reward_function.reward_kwargs.gamma=0.5"
+        "grpo_uniform_v4_consensus_g05|grpo_uniform_v4|compute_score_consensus_outcome_batched|+custom_reward_function.reward_kwargs.gamma=0.5"
+        "grpo_hard_v4_consensus_g05|grpo_hard_v4|compute_score_consensus_outcome_batched|+custom_reward_function.reward_kwargs.gamma=0.5"
+        "grpo_edge_v4_consensus_a05|grpo_edge_v4|compute_score_consensus_blend_batched|+custom_reward_function.reward_kwargs.alpha=0.5"
     )
 else
     RUNS=(
-        "grpo_edge_v4_consensus|grpo_edge_v4|compute_score_consensus_only|"
-        "grpo_uniform_v4_consensus|grpo_uniform_v4|compute_score_consensus_only|"
-        "grpo_hard_v4_consensus|grpo_hard_v4|compute_score_consensus_only|"
+        "grpo_edge_v4_consensus|grpo_edge_v4|compute_score_consensus_only_batched|"
+        "grpo_uniform_v4_consensus|grpo_uniform_v4|compute_score_consensus_only_batched|"
+        "grpo_hard_v4_consensus|grpo_hard_v4|compute_score_consensus_only_batched|"
     )
 fi
 
@@ -160,6 +165,7 @@ train_one_cell () {
         "custom_reward_function.path=verl/reward_fn.py"
         "custom_reward_function.name=${reward_fn}"
         "+custom_reward_function.reward_kwargs.value_tolerance=1e-6"
+        "reward_model.reward_manager=batch"
         "trainer.experiment_name=${new_run}"
         "trainer.default_local_dir=${RESULTS_BASE}/${new_run}"
     )
