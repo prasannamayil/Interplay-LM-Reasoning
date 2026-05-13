@@ -22,9 +22,22 @@ checkpoints/
 dllm/saves/
 LLaMA-Factory/saves/
 .hf_cache/
+.models/
+saves/
 
-# Results (checkpoints are too large)
-results/
+# Vendored / external repos kept out of this tree's history
+dllm/
+lingua/
+
+# Stray downloads (papers, screenshots) that don't belong in git
+*.pdf
+*.png
+
+# Results: ignore everything except curated markdown findings/plans, which
+# we DO want under version control.
+results/**
+!results/
+!results/*.md
 
 # WandB
 wandb/
