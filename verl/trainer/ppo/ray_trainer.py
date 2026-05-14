@@ -634,7 +634,28 @@ class RayPPOTrainer:
 
         data_sources = np.concatenate(data_source_lst, axis=0)
 
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        # Drop non-scalar reward_extra_info fields from the validation metric
+        # aggregation. These are typically per-token tensors emitted by
+        # custom reward functions (e.g. ``shape_factor_per_token`` from the
+        # phase1e loss-shaper reward fns) -- they are consumed elsewhere
+        # (the actor-side advantage hook) and aggregating them with
+        # ``np.mean`` would fail on inhomogeneous shapes. Drop also fields
+        # whose first non-None entry is non-scalar.
+        scalar_extra_infos = {}
+        for key, lst in reward_extra_infos_dict.items():
+            if not lst:
+                scalar_extra_infos[key] = lst
+                continue
+            v0 = next((x for x in lst if x is not None), None)
+            if v0 is None:
+                # All None -- nothing to aggregate either; safe to skip.
+                continue
+            if isinstance(v0, (list, tuple, np.ndarray)):
+                continue
+            scalar_extra_infos[key] = lst
+        data_src2var2metric2val = process_validation_metrics(
+            data_sources, sample_uids, scalar_extra_infos
+        )
 
         metric_dict = {}
         id_acc_vals = []
@@ -1717,7 +1738,25 @@ class RayPPOTrainer:
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            # ``np.array(list_of_per_rollout_values)`` raises
+                            # ``inhomogeneous shape`` on numpy >= 1.20 when the
+                            # per-rollout values are varying-length arrays
+                            # (e.g. ``shape_factor_per_token`` emitted by the
+                            # phase1e loss-shaper reward fns). Force
+                            # ``dtype=object`` for those non-scalar fields so
+                            # the conversion succeeds and downstream readers
+                            # still get the per-rollout sequences.
+                            converted = {}
+                            for k, v in reward_extra_infos_dict.items():
+                                if not v:
+                                    converted[k] = np.array(v)
+                                    continue
+                                v0 = v[0]
+                                if isinstance(v0, (list, tuple, np.ndarray)):
+                                    converted[k] = np.array(v, dtype=object)
+                                else:
+                                    converted[k] = np.array(v)
+                            batch.non_tensor_batch.update(converted)
 
                         # Train reward predictor and cache uncertainty (sequence-level).
                         ru_pred_metrics = self._compute_reward_prediction_uncertainty(batch, reward_tensor)
