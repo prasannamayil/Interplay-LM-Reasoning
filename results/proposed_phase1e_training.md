@@ -1,14 +1,13 @@
-# Proposed Phase 1e training experiment — `cons_nc` as a per-step process-reward shaper
+# Phase 1e training experiment — `cons_nc` as a process-reward proxy
 
-> **Status: IMPLEMENTED, RUNS PENDING.** The reward function is wired
-> into `verl/reward_fn.py` (`compute_score_consensus_only_batched`,
-> `compute_score_consensus_outcome_batched`,
-> `compute_score_consensus_blend_batched`) and the driver script is at
-> `scripts/gsm_infinity_rl/run_consensus_v4.sh`. First batch (3 cells:
-> `grpo_{edge,uniform,hard}_v4_consensus`, ~12 GPU-hr on 8x H100) is
-> the next thing to run; the followups are the same set with the
-> outcome-gated and blended variants and the DR-GSPO arm. See §3 below
-> for the implementation summary.
+> **Status: AS-REWARD framings TESTED and DEAD on 8 cells; AS-LOSS-
+> SHAPER framing pending implementation; one final salvage cell
+> (α=0.8) running.**
+>
+> See §"Outcome of phase 1e training (as-reward)" below for the full
+> result table and mechanism. Curated companion in
+> `phase1e_consensus_findings.md` §"Training results" + §"Why
+> training failed".
 >
 > Read alongside:
 >
@@ -124,7 +123,159 @@ The shaper is **fully alive** iff it closes ≥ 30% of the dense-process
 gap on op17 outcome for edge: dense gives +0.055 over baseline, so we
 need ≥ +0.017. Practically this is the same as "≥ +0.02".
 
-## 3. Implementation summary
+## 3. Outcome of phase 1e training (as-reward)
+
+The "use cons_nc as a drop-in dense reward" framing was tested in two
+configurations across all four training slices.
+
+### Configuration 1 — pure cons (α=0)
+
+`compute_score_consensus_only_batched`. Cells:
+`grpo_{edge,uniform,hard}_v4_consensus`. **All three collapsed**, on
+hard AND easy ops (e.g. uniform op2-10 outcome p@1 0.965 → 0.383).
+
+Mechanism: cons_nc saturates at 1.0 across all siblings on op2-7
+(every sibling agrees on easy values), so within-prompt advantage
+variance is zero on those ops. With pure cons reward and no outcome
+anchor, the policy has no learning signal on the easy ops where GRPO
+normally gets its strongest gradient → drifts off-distribution.
+
+### Configuration 2 — paper recipe α=0.2 (R = 0.2·outcome + 0.8·cons)
+
+`compute_score_consensus_blend_batched(alpha=0.8)` (where our
+`alpha` is the cons WEIGHT, so alpha=0.8 == paper α=0.2). Cells:
+`grpo_{edge,uniform,hard,id}_v4_consensus_a02`. **Easy-op collapse
+fixed** (the 0.2 outcome anchor preserves the easy-op gradient) **but
+hard-op outcomes still degrade vs baseline on uniform / hard slices**
+(uniform op17-20 outcome p@128 0.808 → 0.352; hard op17-20 p@128
+0.506 → 0.219). The matched dense-process α=0.2 cells (gold signal,
+same recipe) gave clean wins on every slice — biggest is hard-slice
++0.31 outcome p@128 at op17-20 — so the framing isn't broken; the
+cons proxy is.
+
+### Why the as-reward framing fails (mechanism)
+
+On op17 mixed-outcome prompts (the only regime GRPO has gradient on),
+the conditional-mean gap between cons-of-correct and cons-of-wrong
+rollouts is flipped or near-zero in 3 of 4 trained baselines:
+
+| run             | cons(correct) | cons(wrong) | gap        | proc_gold gap |
+|-----------------|---------------|-------------|------------|---------------|
+| BASE_v4          | 0.786         | 0.810       | **−0.025** | +0.161        |
+| grpo_edge_v4     | 0.815         | 0.851       | **−0.035** | +0.338        |
+| grpo_hard_v4     | 0.833         | 0.840       | **−0.007** | +0.249        |
+| grpo_uniform_v4  | 0.895         | 0.783       | +0.113     | +0.377        |
+
+Median within-prompt ρ +0.7 was real, but it's averaged over noisy /
+sign-flipped prompts; GRPO's advantage normalization picks up the
+conditional means, which are essentially overlapping for cons.
+
+Plus the popular-wrong cluster on all-wrong prompts (27-100% of
+op17/20): siblings converge on a popular wrong value → that rollout
+gets high cons → cons-as-reward pushes policy toward popular-wrong.
+
+Full diagnosis in `phase1e_consensus_findings.md` §"Why training failed".
+
+### Final as-reward salvage attempt — α=0.8 (R = 0.8·outcome + 0.2·cons)
+
+`compute_score_consensus_blend_batched(alpha=0.2)`. Driver:
+`scripts/gsm_infinity_rl/run_blend_a08_node{1,2}.sh` (~6.5 hr / node
+on 2 nodes for the 4 cells). At 0.2 cons weight (4× lower than paper
+α=0.2) the popular-wrong gradient is dampened 4× and the outcome
+anchor dominates everywhere except all-wrong prompts (where outcome
+variance = 0 anyway and cons might add small lift via the
+ρ(cons, process_gold) ≈ +0.4-0.9 we measured on AW prompts).
+
+If alpha=0.8 also dies: rollout-level cons-as-reward is fully
+exhausted at our scale. The only remaining path is the per-token
+loss shaper described in §4 below.
+
+## 4. Updated plan — per-token loss shaper (next experiment)
+
+The loss shaper is a fundamentally different (and theoretically more
+principled) formulation:
+
+```python
+loss[t] = (1 + gamma * step_signal[step(t)]) * A_outcome_i * log_p_ratio[t]
+```
+
+where `step_signal[step]` is either `step_correct[step]` (gold) or
+`cons_nc[step]` (proxy), and `A_outcome_i` is the standard GRPO
+outcome advantage. The factor `(1 + γ·signal)` is strictly positive
+for `γ < 1/max_signal`, so it can ONLY rescale gradient magnitude.
+The **sign of the gradient is inherited from the outcome advantage**
+— the source we trust.
+
+### Why this avoids both failure modes
+
+- **Saturation on easy ops**: every step has signal≈1 → every token
+  gets the same multiplier → reduces to baseline. No collapse.
+- **Popular-wrong on hard ops**: signal decides WHERE to focus
+  gradient, not the SIGN. Correct rollouts get positive gradient
+  amplified on high-signal steps (good — let's amplify the right
+  thing); wrong rollouts get negative gradient amplified on
+  high-signal steps (also good — punish the wrong cluster harder).
+  Sign-preserving by construction.
+
+### Faithfulness to what phase1e measured
+
+Phase 1e validated **per-step within-rollout** ρ +0.6-0.8. The loss
+shaper consumes that signal at exactly that granularity. The
+as-reward framing required a stronger correlation property
+(rollout-mean conditional means in the right direction across mixed-
+outcome prompts) that phase1e never measured and that the diagnostic
+above shows doesn't hold. So the loss-shaper is the more faithful
+operationalization of the validated metric, not an escape from it.
+
+### Required experimental design (4 cells if dense_shaper alive)
+
+To keep comparisons clean we need both signals under both framings:
+
+|                    | as RL reward (rollout-level)     | as loss shaper (per-token)    |
+|--------------------|----------------------------------|-------------------------------|
+| outcome only       | baseline ✓                       | (no shaper to apply)          |
+| dense (gold step)  | dense_a02 ✓                      | **dense_shaper γ=0.5 (TBD)**  |
+| cons (proxy step)  | consensus_a02 ✓ (dead)            | **cons_shaper γ=0.5 (TBD)**   |
+
+The `dense_shaper` cell is the new sandbox upper bound for the
+shaper framing. If `dense_shaper` doesn't beat baseline by ≥ +0.02
+outcome on at least one slice, per-step credit doesn't add over
+per-rollout credit at our scale and the `cons_shaper` cell becomes
+moot. If `dense_shaper` is alive, `cons_shaper` measures the
+recovery fraction (same shape as the `dense / consensus` comparison
+in the as-reward column).
+
+### Implementation work (~1-2 days, not yet done)
+
+1. **Per-step → per-token mapping utility** (~half day). Lift the
+   offset-mapping logic from `compute_phase1c.py::compute_signals`
+   into a shared `verl/utils/step_token_map.py`. Inputs: rollout
+   token IDs + the same tokenizer used by the policy. Outputs:
+   `token_step_index[t]` array.
+
+2. **Reward fn extensions** (~few hr). `compute_score_dense_shape_batched`
+   and `compute_score_consensus_shape_batched` parse the rollout,
+   compute per-step `step_correct` (gold) or `cons_nc` (proxy), call
+   the mapping utility, and emit a per-token `shape_factor[t]`
+   alongside the rollout-level outcome score.
+
+3. **verl plumbing** (~half day). `BatchRewardManager` aggregates per-
+   rollout shape arrays into a `(B, T)` tensor and stores it in
+   `data.batch["shape_factor"]`. Add a hook in `main_ppo` after
+   `compute_advantage`: `batch.batch["advantages"] *= shape_factor`.
+   Then the existing actor loss code works unmodified.
+
+4. **Smoke test** on 50 training steps to verify the loss path
+   doesn't NaN and shape_factor magnitudes are reasonable.
+
+5. **Full training** on the 4 slices for both `dense_shaper` and
+   `cons_shaper` (~6.5 hr / node × 4 nodes = ~13 hr if dense_shaper
+   alive and cons_shaper triggered; ~6.5 hr if only dense_shaper).
+
+## DEPRECATED: original implementation summary
+
+(Kept for reference; superseded by §3 outcome and §4 plan above.)
+
 
 The original "How to proceed" checklist was simplified considerably by
 realising that **the cleanest deployable analogue of the dense-process

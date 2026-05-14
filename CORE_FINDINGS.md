@@ -150,9 +150,9 @@ across BASE and all trained runs.)
 
 | candidate                                                                                               | within-rollout ρ on hard ops (gold-grounded)             | regime where alive                          | implementation                                                                   | expected ceiling                                               |
 | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| **Step-level sibling consensus** (`cons_nc`: var_name-conditioned agreement fraction across K=16 siblings) | **+0.60 to +0.80** on op7..20, BASE and all trained runs; survives the mixed-outcome-only sanity check (op17 BASE: any +0.71 vs mixed +0.70) | every regime including the all-wrong subset within a prompt | per-token shaper proportional to the agreement fraction at each step; needs the rollout parser only (no extra forward pass) | NEW — see `results/phase1e_consensus_findings.md`. Cross-dataset transfer to GSM8K is the next test (§6 Tier 0). |
+| **Step-level sibling consensus** (`cons_nc`) — *metric ALIVE, training partially DEAD as rollout-level reward* | +0.60 to +0.80 on op7..20 within-rollout (per-step granularity) | per-step granularity only; rollout-mean cons is FLIPPED on op17 mixed prompts in 3/4 baselines (cons(correct) ≈ cons(wrong); see `phase1e_consensus_findings.md` §"Why training failed") | as-rollout-reward at α∈{0, 0.2}: DEAD (collapsed on hard ops or saturated on easy ops); α=0.8 salvage running; per-token loss shaper (sign-preserving, ~1-2 day verl plumbing) is the remaining shot | NEW — see `phase1e_consensus_findings.md` and `proposed_phase1e_training.md` §4 for the loss-shaper plan. |
 | SDPO-style `prefix_gold_2` / `prefix_sibling_2` advantage augmentation on op19-20 mixed-outcome prompts | +0.10 to +0.20                                           | mixed-outcome only; dead on all-wrong       | hybrid SDPO+GRPO recipe (SDPO paper §4.5)                                        | strictly bounded; can't break out of zero-variance             |
-| Dense `process_reward` as training reward                                                               | +0.06 to +0.08 process-mean over outcome-only at op17-20 | every regime (sandbox-only — requires gold) | replace `compute_score` with `compute_score_process_only`                        | this is the **upper bound** any deployable method has to clear |
+| Dense `process_reward` as training reward (sandbox-only) — **paper-α=0.2 blend is the new headline cell** | +0.06 to +0.08 process at α=0; **+0.31 outcome p@128 on hard slice op17-20 at paper α=0.2** | every regime (sandbox-only — requires gold) | `compute_score_process_only` (α=0) or `compute_score_dense_blend(alpha=0.2)` (paper recipe `R = 0.2*outcome + 0.8*process`) | this is the **upper bound** any deployable method has to clear |
 
 Per-`Define`-step BASE entropy as a per-token loss shaper has been
 moved to the dead list (see §5). The line-mean +0.29 ρ reproduces
@@ -303,16 +303,24 @@ diagnosis and design notes for a future re-attempt.
 The remaining sequencing (in priority order):
 
 1. **Train with `cons_nc` as a per-rollout reward on {edge, uniform,
-   hard} training slices.** Implemented; first batch pending.
-   Reward functions live in `verl/reward_fn.py`
-   (`compute_score_consensus_{only,outcome,blend}_batched`); driver
-   `scripts/gsm_infinity_rl/run_consensus_v4.sh`. Closes how much of
-   the dense-process gap (currently the only intervention beating
-   GRPO by ≥ 5× the noise floor) the deployable signal can recover.
-   First batch is `grpo_{edge,uniform,hard}_v4_consensus` (pure
-   cons reward, no gate); ~12 GPU-hr on 8x H100. Followups
-   (γ-sweep, blend, DR-GSPO arm) are scripted under
-   `WHICH=followups`. Cost for the full grid: ~30 GPU-hr.
+   hard, id} training slices.** DONE on 2 reward configs (8 cells
+   total). **Result: rollout-level cons-as-reward is DEAD at this
+   scale.** Both pure cons (α=0) and paper-recipe blend (α=0.2)
+   collapsed on hard ops, with a definitive mechanistic diagnosis
+   (cons(correct) ≈ cons(wrong) on mixed-outcome op17 prompts in
+   3/4 baselines; popular-wrong cluster dominates). Matched
+   dense-process cells under the same recipe gave clean wins —
+   biggest is `grpo_hard_v4_dense_a02` at +0.31 outcome p@128 on
+   op17-20, the largest dense-process delta in the v4 fleet. Full
+   diagnosis: `phase1e_consensus_findings.md` §"Why training
+   failed". Final salvage attempt at α=0.8 (low cons weight,
+   `run_blend_a08_node{1,2}.sh`) running.
+
+   *Next:* per-token loss shaper (sign-preserving, faithful to the
+   per-step ρ phase1e validated; ~1-2 day verl plumbing). Plan in
+   `proposed_phase1e_training.md` §4. The matched 2x2 (gold/proxy
+   × as-reward/as-shaper) becomes the headline experiment for
+   phase1e.
 2. **Cross-dataset replication of `cons_nc` on GSM8K / MATH-500.**
    The load-bearing "does this scale to discovery?" test. The score
    is "fraction of K-1 siblings that produce the same intermediate

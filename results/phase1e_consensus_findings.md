@@ -2,23 +2,20 @@
 
 > **What this document is.** Curated companion to the auto-generated `phase1e_consensus_report.md`. Tests whether step-level sibling consensus — the fraction of K=16 sibling rollouts that agree on the same `(var_name, value)` for a given step — within-rollout-correlates with `step_correct` on the GSM-Infinity sandbox. Free of any forward pass; uses the existing phase1c sidecars.
 
-> **One-line takeaway.** Step-level sibling consensus is ALIVE in 3/3
-> flavors (`cons_v`, `cons_nv`, `cons_nc`). This is a new model-internal
-> positive within-rollout signal that does not depend on the GSM-Infinity
-> Define-line layout (the parser interface generalises to any benchmark
-> where intermediate quantities can be extracted). Step C (per-step
-> contrastive log-likelihood) was attempted as a logit-level extension and
-> **abandoned at this scale** because the contrastive coverage is too
-> sparse (≥99% step drop on op17) and the algebraic-rhs confound
-> contaminates the headline op — see
-> `phase1e_contrastive_findings.md` for the full diagnosis. Next two
-> experiments: (1) train with `cons_nc` as a per-rollout reward on
-> {edge, uniform, hard} — **NOW IMPLEMENTED** in `verl/reward_fn.py`
-> (`compute_score_consensus_{only,outcome,blend}_batched`); driver
-> `scripts/gsm_infinity_rl/run_consensus_v4.sh` (~12 GPU-hr on 8x H100
-> for the first batch); see `proposed_phase1e_training.md` §3 for the
-> implementation summary; (2) cross-dataset replication on GSM8K /
-> MATH-500 (`proposed_gsm8k_scaling_plan.md`).
+> **One-line takeaway.** Step-level sibling consensus passes the
+> METRIC-level kill criterion (within-rollout median ρ +0.6..+0.8 on
+> op7-20 across BASE and trained runs). But the **rollout-level
+> training experiment failed** under both pure-cons (α=0) and paper-
+> style blend (α=0.2 outcome / 0.8 cons): see §"Training results" below.
+> The diagnostic in §"Why training failed" identified a conditional-mean
+> flip on hard ops — cons(correct rollouts) ≈ cons(wrong rollouts) on
+> op17 mixed prompts in 3/4 baselines, with the popular-wrong cluster
+> dominating the within-prompt advantage. This kills cons-as-rollout-
+> reward at our model scale. Two salvage paths remain: (1) α=0.8
+> outcome / 0.2 cons (pending — `run_blend_a08_node{1,2}.sh`); (2) a
+> per-token loss shaper that preserves the outcome-determined gradient
+> sign (~1-2 day verl plumbing, not yet implemented). See
+> `proposed_phase1e_training.md` for the updated plan.
 
 ## Pre-registered alive/dead decision rule
 
@@ -36,6 +33,119 @@ Row (d) is a non-killing sanity check: if the rho on the MIXED-outcome subset (t
 | `cons_v` | +0.612 → PASS | PASS (grpo_edge_v4, grpo_hard_v4, grpo_uniform_v4) | gg=+0.612 vs all=+0.612 → PASS | +0.696 → pass | **ALIVE** |
 | `cons_nv` | +0.660 → PASS | PASS (grpo_edge_v4, grpo_hard_v4, grpo_uniform_v4) | gg=+0.660 vs all=+0.660 → PASS | +0.696 → pass | **ALIVE** |
 | `cons_nc` | +0.707 → PASS | PASS (grpo_edge_v4, grpo_hard_v4, grpo_uniform_v4) | gg=+0.707 vs all=+0.667 → PASS | +0.872 → pass | **ALIVE** |
+
+## Training results — cons-as-rollout-reward is DEAD at this scale
+
+The metric passed every pre-registered alive/dead check, so we trained
+the matched 4-slice grid in two reward configurations:
+
+| reward formula                                    | cell suffix     | edge | uniform | hard | id |
+|---------------------------------------------------|-----------------|------|---------|------|----|
+| `score = mean cons_nc` (pure)                      | `*_consensus`     | DEAD | DEAD    | DEAD | -  |
+| `score = 0.2*outcome + 0.8*cons_nc` (paper α=0.2)  | `*_consensus_a02` | DEAD | DEAD    | DEAD | DEAD |
+| `score = 0.8*outcome + 0.2*cons_nc` (paper α=0.8)  | `*_consensus_a08` | pending | pending | pending | pending |
+
+Numbers (eval pass@128 averaged over op groups vs same-slice outcome-only baseline):
+
+| slice | op group | outcome p@128 vs baseline (α=0)         | outcome p@128 vs baseline (α=0.2)            |
+|-------|----------|------------------------------------------|----------------------------------------------|
+| edge   | hard (op17-20) | 0.156 (-0.369)                       | 0.470 (-0.055)                                |
+| uniform| hard (op17-20) | 0.151 (-0.657)                       | 0.352 (-0.456)                                |
+| hard   | hard (op17-20) | 0.165 (-0.342)                       | 0.219 (-0.288)                                |
+
+For comparison the matched dense-process cells (gold signal, same α):
+
+| slice | op group | dense (α=0) | dense (α=0.2) |
+|-------|----------|-------------|---------------|
+| edge   | hard (op17-20) | 0.592 (+0.067) | 0.589 (+0.064) |
+| uniform| hard (op17-20) | 0.800 (-0.007) | 0.794 (-0.014) — modest cells, but +0.062 process |
+| hard   | hard (op17-20) | 0.800 (+0.294) | 0.819 (+0.313) — biggest dense win in v4 |
+
+So gold process_reward at α=0.2 is alive (especially on the hard slice,
++0.31 outcome p@128) — the SAME framing with cons substituted is dead.
+
+## Why training failed (mechanism, from existing phase1c rollouts)
+
+The rollout-mean cons signal does not have the property GRPO needs.
+Specifically, on op17 **mixed-outcome** prompts (the only regime
+GRPO has gradient on), the conditional-mean gap between correct and
+wrong rollouts is flipped or near-zero in 3 of 4 trained baselines:
+
+| run             | cons(correct) | cons(wrong) | gap        | proc_gold gap (reference) |
+|-----------------|---------------|-------------|------------|----------------------------|
+| BASE_v4          | 0.786         | 0.810       | **−0.025** | +0.161                     |
+| grpo_edge_v4     | 0.815         | 0.851       | **−0.035** | +0.338                     |
+| grpo_hard_v4     | 0.833         | 0.840       | **−0.007** | +0.249                     |
+| grpo_uniform_v4  | 0.895         | 0.783       | +0.113     | +0.377                     |
+
+Median within-prompt ρ +0.7-0.86 was real, but it lives in a few clean
+prompts and is averaged across many noisy / sign-flipped prompts.
+GRPO's advantage normalization cares about the **within-prompt
+conditional means**, not the median ρ across prompts. On op17 those
+means are essentially overlapping for cons (gap ≤0.04 on the 3 dead
+runs) while gold process_reward has a clean +0.16-0.34 gap.
+
+Additional contributing factors:
+- **Saturation on op2-7**: cons ≈ 1.000 across every sibling →
+  zero within-prompt advantage variance → no gradient on those ops.
+  Pure-cons (α=0) drifts the policy off-distribution because there's
+  no anchor on easy ops. Paper-α=0.2 partially fixes this (the 0.2
+  outcome term provides a small anchor) but cons_a02 still collapses
+  on hard ops because the cons signal at 0.8 weight overwhelms the
+  outcome anchor with the popular-wrong gradient.
+- **Small spread**: within-prompt std of mean-cons-per-rollout is
+  0.06-0.07 on op17 (vs gold process_reward's 0.20+). After GRPO
+  divides by std, even small biases dominate the advantage.
+- **Popular-wrong on AW prompts** (27-100% of op17/20 prompts in
+  trained models): on all-wrong prompts, siblings often converge on
+  one or two popular wrong values. The argmax-cons rollout in those
+  prompts is wrong 88-100% of the time. cons-as-reward pushes the
+  policy toward the popular wrong cluster.
+
+Diagnostic reproduction: see the inline analysis in the agent transcript
+notes (deep diagnostic over the existing phase1c K=16 rollouts of all
+4 trained baselines × op {4, 7, 13, 17, 20}).
+
+## Salvage paths (one tested, one pending implementation)
+
+1. **Higher α (paper α=0.8 — 0.8·outcome + 0.2·cons), pending.**
+   `scripts/gsm_infinity_rl/run_blend_a08_node{1,2}.sh` runs the
+   matched 4-slice grid at this weighting. Hypothesis: at 0.2 cons
+   weight (4× lower than α=0.2) the popular-wrong gradient is
+   dampened enough that the outcome anchor dominates everywhere
+   except all-wrong prompts (where outcome variance = 0 anyway).
+   Best case: small lift via the AW-regime contribution. Worst case:
+   ties baseline. If it dies, rollout-level cons-as-reward is fully
+   exhausted at our scale.
+
+2. **Per-token loss shaper, ~1-2 day verl plumbing, not yet implemented.**
+   `loss[t] = (1 + γ·cons_nc[step(t)]) · A_outcome_i · log_p_ratio[t]`
+   The factor `(1 + γ·cons)` is strictly positive so it can ONLY
+   rescale gradient magnitude. The sign of the gradient is inherited
+   from the outcome advantage `A_outcome_i`, which is the source we
+   trust. This bypasses both the saturation and the popular-wrong
+   failure modes:
+   - Saturation: on op2-7 every step has cons≈1, so every token gets
+     the same multiplier → reduces to baseline.
+   - Popular-wrong: cons decides WHERE to focus gradient, not the SIGN.
+     Correct rollouts get positive gradient amplified on high-cons
+     steps; wrong rollouts get negative gradient amplified on
+     high-cons steps. Both correct directions.
+
+   This is also more faithful to what phase1e validated: the
+   per-step within-rollout ρ +0.6-0.8 is at the granularity the
+   loss shaper consumes, whereas the as-reward framing required a
+   stronger correlation property (rollout-mean conditional means)
+   that phase1e never measured and that the diagnostic above shows
+   doesn't hold.
+
+   For a clean apples-to-apples comparison, the loss shaper should
+   be implemented for BOTH gold step_correct and cons_nc, and the
+   2x2 (gold/proxy) × (as-reward/as-shaper) becomes the headline
+   experiment: dense_shaper sets the new sandbox upper bound;
+   cons_shaper measures the recovery fraction. See
+   `proposed_phase1e_training.md` §"Updated plan" for the proposed
+   wiring.
 
 ## Caveats / what this number is and isn't
 

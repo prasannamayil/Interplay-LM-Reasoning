@@ -730,14 +730,57 @@ outcome-only baseline by ≥ +0.02 on either outcome or process at
 op17-20, AND it reproduces under a multi-seed re-run. Anything
 below +0.02 is empirical noise (twin runs differ by ~0.005-0.010).
 
+### Phase 1e training outcome (DEAD at the rollout-reward level)
+
+Both pure cons (α=0) and paper-recipe blend (α=0.2 / our
+consensus_blend alpha=0.8) collapsed on hard ops across every
+training slice. Headline pass@128 outcome at op17-20:
+
+| training slice | base   | dense_a02 (gold)   | consensus_a02 (cons)    |
+|----------------|--------|---------------------|--------------------------|
+| edge            | 0.525 | 0.589 (+0.064)     | 0.470 (-0.055)            |
+| uniform         | 0.808 | 0.794 (-0.014)     | 0.352 (-0.456)            |
+| hard            | 0.506 | **0.819 (+0.313)** | 0.219 (-0.288)            |
+| id (op2-10)     | 0.994 | 0.994 (-0.001)     | 0.993 (-0.002)            |
+
+Mechanism (full diagnosis in `phase1e_consensus_findings.md`):
+on op17 mixed-outcome prompts the conditional means
+cons(correct rollouts) and cons(wrong rollouts) are essentially
+overlapping (gap ≤ 0.04 on 3/4 baselines), so GRPO's within-prompt
+advantage normalization sees a flat or sign-flipped signal. Plus
+the popular-wrong cluster on all-wrong prompts (27-100% of op17/20
+in trained models) pushes the policy toward the popular wrong
+value when cons is the reward. Median within-prompt ρ +0.7 was
+real but is averaged across noisy / sign-flipped prompts; GRPO
+needs conditional means in the right direction, not just rank
+correlation.
+
+The dense-α=0.2 cell on the hard slice is the **biggest
+process-supervision win in the entire v4 fleet** (+0.31 outcome
+p@128 at op17-20 over the hard-only-outcome baseline). Best v4
+model on hard ops is now `grpo_hard_v4_dense_a02`.
+
+### Phase 1e final salvage attempt (running)
+
+`scripts/gsm_infinity_rl/run_blend_a08_node{1,2}.sh` runs the
+4 cells `grpo_{edge,uniform,hard,id}_v4_consensus_a08`
+(R = 0.8·outcome + 0.2·cons; `compute_score_consensus_blend_batched(alpha=0.2)`).
+~6.5 hr / node on 2 nodes in parallel. If even this dies, rollout-
+level cons-as-reward is fully exhausted at our scale and the only
+remaining shot is the per-token loss shaper described in
+`proposed_phase1e_training.md` §4 (~1-2 day verl plumbing, not
+yet implemented).
+
 ### Comparison reference points the runs land against
 
-| baseline cell             | dense-process ceiling cell  | consensus cell (this section) |
-|---------------------------|------------------------------|-------------------------------|
-| `grpo_edge_v4`             | `grpo_edge_v4_dense`           | `grpo_edge_v4_consensus`       |
-| `grpo_uniform_v4`          | `grpo_uniform_v4_dense`        | `grpo_uniform_v4_consensus`    |
-| `grpo_hard_v4`             | `grpo_hard_v4_dense` (pending) | `grpo_hard_v4_consensus`       |
+| baseline cell             | dense-process ceiling cell                | consensus cell                  |
+|---------------------------|--------------------------------------------|---------------------------------|
+| `grpo_edge_v4`             | `grpo_edge_v4_dense_a02`  (+0.064)          | `grpo_edge_v4_consensus_a02` (-0.055)        |
+| `grpo_uniform_v4`          | `grpo_uniform_v4_dense_a02` (-0.014, but +0.062 process) | `grpo_uniform_v4_consensus_a02` (-0.456)     |
+| `grpo_hard_v4`             | `grpo_hard_v4_dense_a02`  (+0.313)          | `grpo_hard_v4_consensus_a02` (-0.288)        |
+| `grpo_id_v4`               | `grpo_id_v4_dense_a02`    (-0.001)          | `grpo_id_v4_consensus_a02`   (-0.002)        |
 
-The consensus delta vs the dense delta tells us how much of the
-process-reward signal a deployable proxy can recover at our scale.
+The consensus_a02 cells consistently underperform their matched
+dense_a02 cells on every slice. The gap is the recovery deficit a
+deployable proxy would need to close.
 
