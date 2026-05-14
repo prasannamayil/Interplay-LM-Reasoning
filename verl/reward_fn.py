@@ -472,6 +472,72 @@ def compute_score_process_only_batched(
 
 
 # ---------------------------------------------------------------------------
+# Paper-style blended dense-process reward (no outcome gate).
+#
+#   R = alpha * R_out + (1 - alpha) * R_proc_gold
+#
+# This matches "On the Interplay of Pre-Training, Mid-Training, and RL on
+# Reasoning" (2512.07783), Eq. (3): R = α·R_out + (1−α)·R_pv. The paper
+# reports α=0.2 (i.e. 0.2 outcome + 0.8 process) as the sweet spot. No
+# outcome gate -- a structurally-faithful trace with a wrong final answer
+# still receives 0.8 * process_reward, unlike compute_score_with_step_
+# process_* which zeros it out.
+# ---------------------------------------------------------------------------
+
+def compute_score_dense_blend(
+    solution_str: str,
+    ground_truth: Union[Dict, str],
+    data_source: Optional[str] = None,
+    extra_info: Optional[Dict[str, Any]] = None,
+    *,
+    alpha: float = 0.2,
+    value_tolerance: float = 1e-6,
+) -> Dict[str, Any]:
+    """Score = ``alpha * outcome_reward + (1 - alpha) * gold_process_reward``.
+
+    NO outcome gate. Default ``alpha=0.2`` matches the paper's headline
+    α=0.2 / β=0.8 weighting; pass ``alpha=0.0`` to recover pure dense-
+    process (equivalent to ``compute_score_process_only``).
+    """
+    _ = data_source
+    breakdown = _structural_score(
+        solution_str=solution_str,
+        ground_truth=ground_truth,
+        extra_info=extra_info,
+        value_tolerance=value_tolerance,
+    )
+    a = max(0.0, min(1.0, alpha))
+    score = a * breakdown["outcome_reward"] + (1.0 - a) * breakdown["process_reward"]
+    score = max(0.0, min(1.0, score))
+    breakdown["score_alpha"] = a
+    _maybe_dump_proposal_b(breakdown, solution_str=solution_str, extra_info=extra_info)
+    return {"score": score, **breakdown}
+
+
+def compute_score_dense_blend_batched(
+    data_sources,
+    solution_strs,
+    ground_truths,
+    extra_infos,
+    *,
+    alpha: float = 0.2,
+    value_tolerance: float = 1e-6,
+):
+    _ = data_sources
+    return [
+        compute_score_dense_blend(
+            solution_str=s,
+            ground_truth=g,
+            data_source=None,
+            extra_info=ei,
+            alpha=alpha,
+            value_tolerance=value_tolerance,
+        )
+        for s, g, ei in zip(solution_strs, ground_truths, extra_infos, strict=True)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Phase 1e: step-level sibling-consensus reward.
 #
 # Replaces the gold dependency graph used by ``compute_score_process_only``
