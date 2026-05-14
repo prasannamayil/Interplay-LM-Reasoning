@@ -1313,6 +1313,76 @@ class RayPPOTrainer:
             else float(factor.mean().detach().cpu().item()),
         }
 
+    def _apply_loss_shape_to_advantages(self, batch: DataProto) -> dict:
+        """Optionally multiply per-token advantages by a per-token shape
+        factor emitted by the reward function.
+
+        Used for the Phase 1e loss-shaper experiments. The reward
+        function (e.g. ``compute_score_dense_shape_batched`` /
+        ``compute_score_consensus_shape_batched``) emits a numpy array
+        ``shape_factor_per_token`` per rollout in its return dict. The
+        ``BatchRewardManager`` aggregates these into
+        ``batch.non_tensor_batch["shape_factor_per_token"]`` (numpy
+        object array of variable-length arrays). We pad / stack into
+        a (B, T) tensor and post-multiply ``batch.batch["advantages"]``
+        in-place. Sign-preserving (factor >= 0 by construction).
+
+        No-op if the field is absent (i.e. for any reward fn that does
+        not emit shape factors).
+        """
+        if "advantages" not in batch.batch:
+            return {}
+        sf_array = batch.non_tensor_batch.get("shape_factor_per_token")
+        if sf_array is None:
+            return {}
+        try:
+            import numpy as np
+        except ImportError:
+            return {}
+        advantages: torch.Tensor = batch.batch["advantages"]
+        response_mask: torch.Tensor = batch.batch.get("response_mask")
+        device = advantages.device
+        dtype = advantages.dtype
+        B, T = advantages.shape
+        shape_tensor = torch.ones((B, T), dtype=dtype, device=device)
+        n_applied = 0
+        per_rollout_means = []
+        for i in range(B):
+            sf = sf_array[i] if i < len(sf_array) else None
+            if sf is None:
+                continue
+            try:
+                sf_np = np.asarray(sf, dtype=np.float32)
+            except (TypeError, ValueError):
+                continue
+            if sf_np.ndim != 1 or sf_np.size == 0:
+                continue
+            n = int(min(sf_np.shape[0], T))
+            shape_tensor[i, :n] = torch.from_numpy(sf_np[:n]).to(
+                dtype=dtype, device=device
+            )
+            n_applied += 1
+            per_rollout_means.append(float(sf_np[:n].mean()))
+        if n_applied == 0:
+            return {}
+        with torch.no_grad():
+            batch.batch["advantages"] = advantages * shape_tensor
+        metrics = {
+            "shape/n_rollouts_with_factor": float(n_applied),
+            "shape/factor_mean_overall": float(shape_tensor.mean().item()),
+            "shape/factor_max": float(shape_tensor.max().item()),
+            "shape/factor_min": float(shape_tensor.min().item()),
+        }
+        if per_rollout_means:
+            metrics["shape/factor_per_rollout_mean"] = float(
+                sum(per_rollout_means) / len(per_rollout_means)
+            )
+        if response_mask is not None and response_mask.any():
+            masked = shape_tensor[response_mask.bool()]
+            if masked.numel() > 0:
+                metrics["shape/factor_mean_in_response"] = float(masked.mean().item())
+        return metrics
+
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
 
@@ -1688,6 +1758,13 @@ class RayPPOTrainer:
                         ru_adv_metrics = self._apply_reward_uncertainty_to_advantages(batch)
                         if ru_adv_metrics:
                             metrics.update(ru_adv_metrics)
+
+                        # Optionally apply a per-token loss shape factor emitted
+                        # by the reward function (Phase 1e loss-shaper). No-op
+                        # if the reward fn doesn't emit shape_factor_per_token.
+                        shape_metrics = self._apply_loss_shape_to_advantages(batch)
+                        if shape_metrics:
+                            metrics.update(shape_metrics)
 
                     # update critic
                     if self.use_critic:

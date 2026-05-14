@@ -83,7 +83,14 @@ train_one_cell () {
         "trainer.default_local_dir=${RESULTS_BASE}/${new_run}"
     )
     if [ -n "$extra_kw" ]; then
-        overrides+=("$extra_kw")
+        # Split on whitespace so cell entries can pass multiple Hydra
+        # overrides (e.g. "+kwargs.gamma=0.5 +kwargs.tokenizer_path=/x").
+        local -a _extra_args
+        # shellcheck disable=SC2206
+        _extra_args=( $extra_kw )
+        for ea in "${_extra_args[@]}"; do
+            [ -n "$ea" ] && overrides+=("$ea")
+        done
     fi
 
     python3 -m verl.trainer.main_ppo \

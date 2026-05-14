@@ -861,3 +861,336 @@ def compute_score_consensus_blend_batched(
         _maybe_dump_proposal_b(bd, solution_str=s, extra_info=ei)
         results.append(out)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Phase 1e (loss shaper): per-token gradient mass redistribution.
+#
+# After the as-rollout-reward training experiments killed cons_nc as a
+# drop-in dense reward (see `phase1e_consensus_findings.md` §"Why training
+# failed"), the per-step within-rollout rho +0.6..+0.8 is still validated
+# at the granularity it was measured. The loss shaper consumes the signal
+# at exactly that granularity and is sign-preserving by construction:
+#
+#   loss[t] = (1 + gamma * step_signal[step(t)]) * A_outcome_i * log_p_ratio[t]
+#
+# The factor (1 + gamma * signal) is strictly positive so it can ONLY
+# rescale gradient magnitude. The sign of the gradient is inherited from
+# the standard outcome-only GRPO advantage A_outcome_i, the source we
+# trust. Operationally the reward function emits the rollout-level
+# outcome score AND a per-token shape_factor numpy array; verl's
+# trainer post-multiplies advantages by the shape factor right after
+# `compute_advantage`.
+#
+# Two variants:
+#   compute_score_dense_shape_batched      -- gold step_correct (0/1 per
+#                                              gold-grounded Define line).
+#                                              Sandbox upper bound for the
+#                                              loss-shaper framing.
+#   compute_score_consensus_shape_batched  -- sibling cons_nc (in [0,1] per
+#                                              gold-grounded Define line).
+#                                              Deployable proxy.
+#
+# The reward function needs the policy tokenizer to map each step's char
+# span to token indices. We accept an optional `tokenizer_path` kwarg
+# (the model path; the policy tokenizer lives there) and lazy-load /
+# cache the tokenizer once per process.
+# ---------------------------------------------------------------------------
+
+import importlib
+
+_DEFINE_HEADER_RE = re.compile(
+    r"Define\s+(.*?)\s+(?:as|a)\s+(?:[A-Za-z]+\s+)*([A-Za-z]);",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_TOKENIZER_CACHE: Dict[str, Any] = {}
+
+
+def _get_tokenizer_cached(tokenizer_path: Optional[str]):
+    if not tokenizer_path:
+        return None
+    if tokenizer_path in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[tokenizer_path]
+    try:
+        transformers = importlib.import_module("transformers")
+        tok = transformers.AutoTokenizer.from_pretrained(
+            tokenizer_path, trust_remote_code=True
+        )
+        _TOKENIZER_CACHE[tokenizer_path] = tok
+        return tok
+    except Exception as exc:
+        print(f"[reward_fn] failed to load tokenizer from {tokenizer_path}: {exc}",
+              flush=True)
+        _TOKENIZER_CACHE[tokenizer_path] = None
+        return None
+
+
+def _extract_define_spans(solution_str: str):
+    """Return [(param_name, value, char_start, char_end), ...] for each
+    Define line in ``solution_str``.
+
+    char_start / char_end are positions in the original solution_str
+    (the same string the policy tokenizer sees when decoding the rollout).
+    Each step span runs from the start of "Define" to the start of the
+    next "Define" (or end of string), so it covers the Define header
+    plus the math body that resolves the variable.
+
+    ``value`` is the per-rollout assigned value for the step's variable,
+    via ``SolutionParser`` (same parser as `_structural_score`); ``None``
+    if no numeric value was recovered.
+    """
+    if not isinstance(solution_str, str) or not solution_str:
+        return []
+    try:
+        parser = SolutionParser()
+        parsed = parser.parse(solution_str)
+    except Exception:
+        parsed = None
+    matches = list(_DEFINE_HEADER_RE.finditer(solution_str))
+    if not matches:
+        return []
+    spans = []
+    n = min(len(matches), len(parsed.steps)) if parsed is not None else 0
+    for i in range(n):
+        m = matches[i]
+        step = parsed.steps[i]
+        char_start = m.start()
+        char_end = matches[i + 1].start() if i + 1 < len(matches) else len(solution_str)
+        spans.append(((step.parameter_name or "").strip(), step.value,
+                      char_start, char_end))
+    return spans
+
+
+def _gold_step_correct_per_span(spans, gold_solution: Optional[str]):
+    """For each span, return 1.0 if the rollout's value matches gold for
+    that var_name, 0.0 if mismatch, None if no gold node exists for the
+    var_name (i.e. hallucinated step -- shape factor stays 1.0).
+    """
+    if not spans:
+        return []
+    out = [None] * len(spans)
+    if not isinstance(gold_solution, str) or not gold_solution.strip():
+        return out
+    try:
+        gold_graph = parse_graph(gold_solution)
+    except Exception:
+        return out
+    if gold_graph is None:
+        return out
+    gold_map: Dict[str, Optional[float]] = {}
+    for name, info in gold_graph.nodes.items():
+        try:
+            gold_map[name] = float(info.value) if info.value is not None else None
+        except (TypeError, ValueError):
+            gold_map[name] = None
+    for i, (var_name, pred_value, _, _) in enumerate(spans):
+        if not var_name or var_name not in gold_map:
+            continue
+        gv = gold_map[var_name]
+        try:
+            pv = float(pred_value) if pred_value is not None else None
+        except (TypeError, ValueError):
+            pv = None
+        if gv is None or pv is None:
+            out[i] = 0.0
+            continue
+        out[i] = 1.0 if abs(gv - pv) < 1e-6 else 0.0
+    return out
+
+
+def _token_shape_factor_from_spans(
+    solution_str: str,
+    spans,
+    signal_per_step,
+    gamma: float,
+    tokenizer,
+):
+    """Build a per-token shape factor array of length n_response_tokens.
+
+    For each step k with signal_per_step[k] not None, every token whose
+    [tok_start, tok_end] char span overlaps the step's [cs, ce] gets
+    factor 1 + gamma * signal_per_step[k]. Tokens outside any step (or
+    in steps with None signal) get 1.0.
+
+    Returns a numpy array of float32, or None if the tokenizer is missing
+    or there are no spans with non-None signal.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    if tokenizer is None or not solution_str:
+        return None
+    if not spans or all(s is None for s in signal_per_step):
+        return None
+    try:
+        enc = tokenizer(solution_str, return_offsets_mapping=True,
+                        add_special_tokens=False)
+    except (TypeError, ValueError):
+        try:
+            enc = tokenizer(solution_str, add_special_tokens=False)
+            if "offset_mapping" not in enc:
+                return None
+        except Exception:
+            return None
+    offsets = enc.get("offset_mapping")
+    if not offsets:
+        return None
+    n_tok = len(offsets)
+    sf = np.ones(n_tok, dtype=np.float32)
+    for (var_name, _val, cs, ce), sig in zip(spans, signal_per_step):
+        if sig is None:
+            continue
+        try:
+            sig_f = float(sig)
+        except (TypeError, ValueError):
+            continue
+        boost = 1.0 + gamma * sig_f
+        if boost < 0.0:
+            boost = 0.0
+        for i, (ts, te) in enumerate(offsets):
+            # Skip pure-padding offsets (some tokenizers emit (0,0))
+            if te == ts == 0:
+                continue
+            if te > cs and ts < ce:
+                sf[i] = boost
+    return sf
+
+
+# ---- dense (gold) shaper ---------------------------------------------------
+
+def compute_score_dense_shape_batched(
+    data_sources,
+    solution_strs,
+    ground_truths,
+    extra_infos,
+    *,
+    gamma: float = 0.5,
+    tokenizer_path: Optional[str] = None,
+    value_tolerance: float = 1e-6,
+    **_,
+):
+    """Per-token loss shaper using gold ``step_correct`` per Define line.
+
+    Score = ``outcome_reward`` (binary). The rollout-level GRPO advantage
+    is therefore the standard outcome advantage; the loss shaper
+    redistributes per-token gradient mass via ``shape_factor_per_token``,
+    which is consumed by the trainer post-multiplying advantages.
+
+    Default ``gamma=0.5`` -> tokens in correct gold-grounded steps get
+    1.5x gradient magnitude; tokens in wrong gold-grounded steps get
+    1.0x; tokens outside any gold-grounded step (Define hallucinations
+    or non-Define content) get 1.0x.
+
+    ``tokenizer_path`` should be the policy model path (e.g. the
+    `actor_rollout_ref.model.path` config value); pass via Hydra:
+       +custom_reward_function.reward_kwargs.tokenizer_path=$MODEL_PATH
+    """
+    _ = data_sources
+    tokenizer = _get_tokenizer_cached(tokenizer_path)
+    results = []
+    for s, g, ei in zip(solution_strs, ground_truths, extra_infos, strict=True):
+        breakdown = _structural_score(
+            solution_str=s,
+            ground_truth=g,
+            extra_info=ei,
+            value_tolerance=value_tolerance,
+        )
+        gold_solution = None
+        if isinstance(g, dict):
+            gold_solution = g.get("solution") or g.get("gold_solution")
+        if not gold_solution and isinstance(ei, dict):
+            gold_solution = ei.get("gold_solution")
+        spans = _extract_define_spans(s)
+        signals = _gold_step_correct_per_span(spans, gold_solution)
+        sf = _token_shape_factor_from_spans(s, spans, signals, gamma, tokenizer)
+        n_steps_signaled = sum(1 for v in signals if v is not None)
+        out = {
+            "score": float(breakdown["outcome_reward"]),
+            **breakdown,
+            "shape_factor_per_token": sf,
+            "shape_n_define_steps": len(spans),
+            "shape_n_steps_signaled": n_steps_signaled,
+            "shape_gamma": float(gamma),
+        }
+        _maybe_dump_proposal_b(breakdown, solution_str=s, extra_info=ei)
+        results.append(out)
+    return results
+
+
+# ---- consensus (proxy) shaper ----------------------------------------------
+
+def compute_score_consensus_shape_batched(
+    data_sources,
+    solution_strs,
+    ground_truths,
+    extra_infos,
+    *,
+    gamma: float = 0.5,
+    tokenizer_path: Optional[str] = None,
+    value_tolerance: float = 1e-6,
+    **_,
+):
+    """Per-token loss shaper using sibling ``cons_nc`` per Define line.
+
+    Score = ``outcome_reward`` (binary). cons_nc per step is computed
+    across the K sibling rollouts of the same prompt (verl's
+    BatchRewardManager passes them in a single call). Steps whose
+    ``var_name`` no other sibling defined contribute None signal
+    -> shape factor 1.0 on those tokens.
+
+    Default ``gamma=0.5``. Pass tokenizer via:
+       +custom_reward_function.reward_kwargs.tokenizer_path=$MODEL_PATH
+    """
+    _ = data_sources
+    tokenizer = _get_tokenizer_cached(tokenizer_path)
+    breakdowns = _consensus_breakdown(
+        solution_strs=solution_strs,
+        ground_truths=ground_truths,
+        extra_infos=extra_infos,
+        value_tolerance=value_tolerance,
+    )
+    # Re-compute per-rollout pairs + group keys so we can assign cons_nc
+    # back to spans at the per-step level (the helper that already
+    # exists, ``_compute_cons_nc_per_rollout``, returns a per-rollout
+    # list of cons values aligned with that rollout's _extract_define_pairs
+    # output -- which is in the same order as _extract_define_spans).
+    pairs_per_rollout = [_extract_define_pairs(s) for s in solution_strs]
+    group_keys = [_group_key(ei, i)
+                  for i, ei in enumerate(extra_infos)]
+    cons_per_rollout = _compute_cons_nc_per_rollout(
+        pairs_per_rollout, group_keys
+    )
+    results = []
+    for i, (s, ei, bd) in enumerate(
+        zip(solution_strs, extra_infos, breakdowns, strict=True)
+    ):
+        spans = _extract_define_spans(s)
+        cons_steps = cons_per_rollout[i] if i < len(cons_per_rollout) else []
+        # Align cons_steps (one per `_extract_define_pairs` step) with
+        # spans (one per `_DEFINE_HEADER_RE` match). Both walk Define
+        # lines in source order; pad / truncate to span length.
+        signals = []
+        for k in range(len(spans)):
+            if k < len(cons_steps):
+                v = cons_steps[k]
+                if v != v:  # NaN
+                    signals.append(None)
+                else:
+                    signals.append(float(v))
+            else:
+                signals.append(None)
+        sf = _token_shape_factor_from_spans(s, spans, signals, gamma, tokenizer)
+        n_steps_signaled = sum(1 for v in signals if v is not None)
+        out = {
+            "score": float(bd["outcome_reward"]),
+            **bd,
+            "shape_factor_per_token": sf,
+            "shape_n_define_steps": len(spans),
+            "shape_n_steps_signaled": n_steps_signaled,
+            "shape_gamma": float(gamma),
+        }
+        _maybe_dump_proposal_b(bd, solution_str=s, extra_info=ei)
+        results.append(out)
+    return results
