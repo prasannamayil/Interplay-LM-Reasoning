@@ -760,16 +760,33 @@ process-supervision win in the entire v4 fleet** (+0.31 outcome
 p@128 at op17-20 over the hard-only-outcome baseline). Best v4
 model on hard ops is now `grpo_hard_v4_dense_a02`.
 
-### Phase 1e final salvage attempt (running)
+### Phase 1e pivot (running): per-token loss shaper
 
-`scripts/gsm_infinity_rl/run_blend_a08_node{1,2}.sh` runs the
-4 cells `grpo_{edge,uniform,hard,id}_v4_consensus_a08`
-(R = 0.8·outcome + 0.2·cons; `compute_score_consensus_blend_batched(alpha=0.2)`).
-~6.5 hr / node on 2 nodes in parallel. If even this dies, rollout-
-level cons-as-reward is fully exhausted at our scale and the only
-remaining shot is the per-token loss shaper described in
-`proposed_phase1e_training.md` §4 (~1-2 day verl plumbing, not
-yet implemented).
+After the as-rollout-reward grid died, we abandoned the as-reward
+direction and pivoted to a per-token loss shaper:
+
+```
+loss[t] = (1 + gamma * signal[step(t)]) * A_outcome_i * log_p_ratio[t]
+```
+
+Sign-preserving by construction: outcome anchors gradient direction
+(via standard GRPO advantage); signal redistributes per-token
+magnitude. The per-step within-rollout rho phase1e validated lives
+at exactly the granularity the shaper consumes.
+
+Implementation:
+- `verl/reward_fn.py::compute_score_dense_shape_batched` (gold
+  step_correct as signal -- sandbox UB)
+- `verl/reward_fn.py::compute_score_consensus_shape_batched`
+  (sibling cons_nc as signal -- deployable proxy)
+- `verl/trainer/ppo/ray_trainer.py::_apply_loss_shape_to_advantages`
+  (post-`compute_advantage` hook)
+
+Run scripts: `scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh`
+parallelize the matched 2x3 grid across 2 nodes:
+  node 1: `grpo_{edge,uniform,hard}_v4_dense_shaper` (~10 hr)
+  node 2: `grpo_{edge,uniform,hard}_v4_cons_shaper`  (~10 hr)
+gamma=0.5 default. Eval pass@128 against gold-process.
 
 ### Comparison reference points the runs land against
 

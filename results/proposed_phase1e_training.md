@@ -245,32 +245,39 @@ moot. If `dense_shaper` is alive, `cons_shaper` measures the
 recovery fraction (same shape as the `dense / consensus` comparison
 in the as-reward column).
 
-### Implementation work (~1-2 days, not yet done)
+### Implementation (DONE, RUNNING)
 
-1. **Per-step → per-token mapping utility** (~half day). Lift the
-   offset-mapping logic from `compute_phase1c.py::compute_signals`
-   into a shared `verl/utils/step_token_map.py`. Inputs: rollout
-   token IDs + the same tokenizer used by the policy. Outputs:
-   `token_step_index[t]` array.
-
-2. **Reward fn extensions** (~few hr). `compute_score_dense_shape_batched`
+1. **Reward fn extensions** -- `compute_score_dense_shape_batched`
    and `compute_score_consensus_shape_batched` parse the rollout,
-   compute per-step `step_correct` (gold) or `cons_nc` (proxy), call
-   the mapping utility, and emit a per-token `shape_factor[t]`
-   alongside the rollout-level outcome score.
+   compute per-step `step_correct` (gold) or `cons_nc` (proxy), and
+   emit a per-token `shape_factor_per_token` numpy array alongside
+   the rollout-level outcome score. Tokenizer is accessed via
+   `reward_kwargs.tokenizer_path` (lazy-loaded + cached). Char-to-
+   token mapping uses `tokenizer(..., return_offsets_mapping=True)`.
 
-3. **verl plumbing** (~half day). `BatchRewardManager` aggregates per-
-   rollout shape arrays into a `(B, T)` tensor and stores it in
-   `data.batch["shape_factor"]`. Add a hook in `main_ppo` after
-   `compute_advantage`: `batch.batch["advantages"] *= shape_factor`.
-   Then the existing actor loss code works unmodified.
+2. **Trainer hook** -- `verl/trainer/ppo/ray_trainer.py::
+   _apply_loss_shape_to_advantages(batch)` is invoked right after
+   `compute_advantage`. It reads
+   `batch.non_tensor_batch["shape_factor_per_token"]` (which the
+   existing `BatchRewardManager` already populates from the reward
+   fn return dicts), pads/stacks into a `(B, T)` tensor, and
+   in-place multiplies `batch.batch["advantages"]`. No-op if the
+   field is absent. Same pattern as the existing
+   `_apply_reward_uncertainty_to_advantages` hook.
 
-4. **Smoke test** on 50 training steps to verify the loss path
-   doesn't NaN and shape_factor magnitudes are reasonable.
+3. **Smoke test** -- end-to-end logic verified on a 4-rollout
+   synthetic batch. Span extraction, gold step_correct, cons_nc per
+   step, char->token mapping, and advantage multiplication all
+   produce the expected values. All shape factors strictly positive
+   (sign-preserving by construction).
 
-5. **Full training** on the 4 slices for both `dense_shaper` and
-   `cons_shaper` (~6.5 hr / node × 4 nodes = ~13 hr if dense_shaper
-   alive and cons_shaper triggered; ~6.5 hr if only dense_shaper).
+4. **Run scripts** -- `scripts/gsm_infinity_rl/run_loss_shaper_
+   node{1,2}.sh` parallelize the matched 2x3 grid across 2 nodes
+   (3 cells per node, ~10 hr / node):
+     node 1: dense_shaper on edge / uniform / hard (sandbox UB)
+     node 2: cons_shaper  on edge / uniform / hard (deployable proxy)
+   gamma=0.5 default. Eval pass@128 against gold-process for direct
+   comparison with every existing v4 row.
 
 ## DEPRECATED: original implementation summary
 
