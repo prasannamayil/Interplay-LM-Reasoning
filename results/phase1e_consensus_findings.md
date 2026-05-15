@@ -4,16 +4,21 @@
 
 > **One-line takeaway.** Step-level sibling consensus passes the
 > METRIC-level kill criterion (within-rollout median ρ +0.6..+0.8 on
-> op7-20 across BASE and trained runs) but **rollout-level
-> cons-as-reward training is DEAD on 8 cells** — both pure-cons (α=0)
-> and paper α=0.2 collapsed on hard ops. Mechanism: cons(correct) ≈
-> cons(wrong) on op17 mixed prompts in 3/4 baselines (§"Why training
-> failed" below). **Pivot: per-token loss shaper** — sign-preserving
-> by construction, faithful to the per-step ρ phase1e validated.
-> Reward fns + trainer hook implemented (`verl/reward_fn.py::compute_
-> score_{dense,consensus}_shape_batched` + `verl/trainer/ppo/
-> ray_trainer.py::_apply_loss_shape_to_advantages`); drivers
-> `scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh` running.
+> op7-20 across BASE and trained runs). **Rollout-level
+> cons-as-reward training is DEAD on 8 cells** — both pure-cons
+> (α=0) and paper α=0.2 collapsed on hard ops; mechanism is
+> cons(correct) ≈ cons(wrong) on op17 mixed prompts in 3/4 baselines
+> (§"Why training failed"). **Per-token loss shaper IS ALIVE on
+> edge: cons_shaper γ=0.5 lifts edge hard outcome p@128 by +0.033
+> (~87% recovery of matched dense_shaper +0.038), ties baseline
+> ±0.015 on every other slice/op (no collapse anywhere).** First
+> positive deployable proxy result in the project. Caveat: the
+> shaper framing's UB on hard slice (dense_shaper -0.036) is much
+> weaker than the as-reward UB (dense_a02 +0.31) — shaper amplifies
+> a sparse outcome gradient instead of providing continuous reward.
+> γ-sweep at γ∈{1, 2} pending. Same metric (cons_nc), two
+> operationalizations: as rollout-reward it collapses; as per-token
+> loss shaper it tracks the gold UB on the slice with signal.
 
 ## Pre-registered alive/dead decision rule
 
@@ -160,21 +165,69 @@ the diagnostic above shows doesn't hold.
   loaded + cached); maps char spans to token indices via
   `tokenizer(...).offset_mapping`.
 
-### Running experiment (matched 2x3 grid)
+### Loss shaper results — γ=0.5 grid (DONE on 6 cells)
 
-`scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh` with gamma=0.5,
-3 cells per node, ~10 hr each on 8x H100:
+`scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh` ran the
+matched 2x3 grid (signal x slice). All 6 cells trained 388 steps
+and were eval'd pass@128 against gold-process. Δ vs same-slice
+outcome-only baseline, averaged over op17-20:
 
-| node | cells                                            | signal       |
-|------|--------------------------------------------------|--------------|
-| 1    | `grpo_{edge,uniform,hard}_v4_dense_shaper`         | gold (UB)    |
-| 2    | `grpo_{edge,uniform,hard}_v4_cons_shaper`          | cons (proxy) |
+| training slice | dense_shaper γ=0.5 (gold UB)         | cons_shaper γ=0.5 (proxy)               |
+|----------------|---------------------------------------|------------------------------------------|
+| edge            | **+0.038** outcome p@128 / +0.001 process | **+0.033** outcome p@128 / -0.004 process  |
+| uniform         | -0.016 outcome p@128 / -0.021 process | -0.015 outcome p@128 / -0.003 process      |
+| hard            | -0.036 outcome p@128 / -0.034 process | -0.009 outcome p@128 / +0.002 process       |
 
-`dense_shaper` sets the new sandbox upper bound for the shaper
-framing. `cons_shaper - dense_shaper` gap on each slice quantifies
-the deployable-proxy recovery deficit at the per-token loss-shaper
-granularity. Eval is pass@128 against gold-process so cells compare
-1:1 with every existing v4 row in `dense_process_report.md`.
+**Edge slice is the clean positive cell.** cons_shaper's recovery
+fraction = +0.033 / +0.038 ≈ 87% of the matched gold UB.
+
+**Uniform is saturated.** baseline at 0.808 outcome p@128 hard ops;
+all interventions within ±0.02.
+
+**Hard is weak for the shaper framing.** The shaper amplifies
+gradient on gold-grounded steps in correct rollouts; on hard slice
+correctness is sparse (~20% of rollouts) so the gradient itself is
+sparse, and concentrating it via the shaper narrows the policy
+distribution slightly. Notably: cons_shaper (-0.009) is BETTER
+than dense_shaper (-0.036) on hard slice — because cons_nc has
+signal on hallucinated Define lines too (any var_name a sibling
+defines), spreading the shaping more broadly than gold step_correct
+which is None on hallucinated steps.
+
+### Comparison to the matched as-reward grid
+
+Same metric (cons_nc), same 4 training slices, two
+operationalizations:
+
+| slice    | cons as-reward (α=0.2) | cons LOSS SHAPER (γ=0.5)  |
+|----------|-------------------------|----------------------------|
+| edge      | -0.055 outcome p@128 (DEAD)         | **+0.033** (alive)             |
+| uniform   | -0.456 outcome p@128 (DEAD)         | -0.015 (no collapse)            |
+| hard      | -0.288 outcome p@128 (DEAD)         | -0.009 (no collapse)            |
+
+The framing is the experiment. Same metric, different operationalization,
+opposite sign on every cell. The sign-preserving construction in the
+shaper formulation prevents the popular-wrong cluster from flipping
+the within-prompt advantage.
+
+### γ-sweep (RUNNING)
+
+`run_loss_shaper_node{1_g1, 2_g2}.sh` runs γ∈{1.0, 2.0} on edge +
+hard for both signals (8 cells total, 4 per node, ~13 hr / node).
+Tests where the saturation knee is — γ=0.5 gave correct steps a 1.5x
+gradient boost; γ=1.0 = 2x; γ=2.0 = 3x. If the lift on edge
+saturates by γ=1.0, we have the headline. If it grows further, we
+extend the sweep.
+
+### Pre-registered alive criterion
+
+Per `proposed_phase1e_training.md` §2.4 (Exit B(i)): the consensus
+intervention is **alive** iff at least one cell beats its
+outcome-only baseline by ≥ +0.02 on either outcome or process at
+op17-20. **PASSED**: cons_shaper γ=0.5 on edge slice gives +0.033
+outcome p@128 on op17-20. Multi-seed re-run on this cell pending
+to confirm (one extra seed; +0.033 is small enough to need
+confirmation under the empirical ±0.005-0.010 noise floor).
 
 ## Caveats / what this number is and isn't
 

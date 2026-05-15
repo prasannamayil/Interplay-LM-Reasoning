@@ -760,10 +760,10 @@ process-supervision win in the entire v4 fleet** (+0.31 outcome
 p@128 at op17-20 over the hard-only-outcome baseline). Best v4
 model on hard ops is now `grpo_hard_v4_dense_a02`.
 
-### Phase 1e pivot (running): per-token loss shaper
+### Phase 1e pivot: per-token loss shaper -- DONE @ γ=0.5; γ-sweep RUNNING
 
-After the as-rollout-reward grid died, we abandoned the as-reward
-direction and pivoted to a per-token loss shaper:
+After the as-rollout-reward grid died (8 cells, all collapsed on
+hard ops), we pivoted to a per-token loss shaper:
 
 ```
 loss[t] = (1 + gamma * signal[step(t)]) * A_outcome_i * log_p_ratio[t]
@@ -776,17 +776,53 @@ at exactly the granularity the shaper consumes.
 
 Implementation:
 - `verl/reward_fn.py::compute_score_dense_shape_batched` (gold
-  step_correct as signal -- sandbox UB)
+  step_correct as signal -- sandbox UB for the shaper framing)
 - `verl/reward_fn.py::compute_score_consensus_shape_batched`
   (sibling cons_nc as signal -- deployable proxy)
 - `verl/trainer/ppo/ray_trainer.py::_apply_loss_shape_to_advantages`
   (post-`compute_advantage` hook)
+- Tokenizer access via `reward_kwargs.tokenizer_path` (lazy-loaded);
+  char->token mapping via `tokenizer(...).offset_mapping`.
 
-Run scripts: `scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh`
-parallelize the matched 2x3 grid across 2 nodes:
-  node 1: `grpo_{edge,uniform,hard}_v4_dense_shaper` (~10 hr)
-  node 2: `grpo_{edge,uniform,hard}_v4_cons_shaper`  (~10 hr)
-gamma=0.5 default. Eval pass@128 against gold-process.
+#### v4 / Loss shaper γ=0.5 (DONE)
+
+Δ vs same-slice outcome-only baseline, averaged over op17-20:
+
+| training slice | dense_shaper Δ (gold UB)            | cons_shaper Δ (proxy)                | recovery fraction |
+|----------------|--------------------------------------|---------------------------------------|--------------------|
+| edge            | +0.038 outcome p@128 / +0.001 process | **+0.033 outcome p@128** / -0.004 process | **~87%** (HEADLINE) |
+| uniform         | -0.016 outcome p@128 / -0.021 process | -0.015 outcome p@128 / -0.003 process    | n/a (saturated)    |
+| hard            | -0.036 outcome p@128 / -0.034 process | -0.009 outcome p@128 / +0.002 process    | n/a (signal-poor)   |
+
+Cells: `grpo_{edge,uniform,hard}_v4_{dense,cons}_shaper` @ step 386/388.
+Driver: `scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh`.
+
+**cons_shaper edge passes the pre-registered Exit B(i) ≥+0.02
+threshold** -- first positive deployable proxy result in the project.
+Ties baseline ±0.015 on every other slice/op group (vs cons_a02
+which catastrophically collapsed -0.456 on uniform / -0.288 on hard).
+Sign-preserving construction works as designed.
+
+The shaper framing's UB on hard slice (dense_shaper -0.036) is much
+weaker than the as-reward UB (dense_a02 +0.31) -- the shaper
+amplifies a sparse outcome gradient instead of providing continuous
+reward. Trade-off: as-reward has the headroom (gold required); shaper
+is the sign-preserving deployable formulation (proxy works).
+
+#### v4 / Loss shaper γ-sweep (RUNNING)
+
+`run_loss_shaper_node1_g1.sh` (γ=1.0) and `run_loss_shaper_node2_g2.sh`
+(γ=2.0) run 4 cells / node x ~3.25 hr = ~13 hr / node. Tests where
+the saturation knee of the shaper framing is.
+
+| cell                                | base                  | γ            |
+|-------------------------------------|-----------------------|---------------|
+| `grpo_{edge,hard}_v4_{dense,cons}_shaper_g1`  | grpo_{edge,hard}_v4    | 1.0           |
+| `grpo_{edge,hard}_v4_{dense,cons}_shaper_g2`  | grpo_{edge,hard}_v4    | 2.0           |
+
+Followups: multi-seed re-run on cons_shaper γ=0.5 edge cell to
+confirm +0.033 (one extra seed), then γ=4.0 if the sweep doesn't
+saturate by γ=2.0.
 
 ### Comparison reference points the runs land against
 

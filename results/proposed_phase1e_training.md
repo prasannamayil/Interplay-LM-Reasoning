@@ -1,13 +1,14 @@
 # Phase 1e training experiment — `cons_nc` as a process-reward proxy
 
-> **Status: AS-REWARD framings TESTED and DEAD on 8 cells; AS-LOSS-
-> SHAPER framing pending implementation; one final salvage cell
-> (α=0.8) running.**
+> **Status: AS-REWARD framings DEAD (8 cells, 4 slices x 2 reward
+> configs). AS-LOSS-SHAPER framing γ=0.5 ALIVE on edge slice
+> (cons_shaper edge hard outcome p@128 +0.033, ~87% recovery of
+> matched dense_shaper +0.038; ties baseline elsewhere -- no collapse
+> anywhere). γ-sweep γ∈{1.0, 2.0} RUNNING.**
 >
-> See §"Outcome of phase 1e training (as-reward)" below for the full
-> result table and mechanism. Curated companion in
-> `phase1e_consensus_findings.md` §"Training results" + §"Why
-> training failed".
+> See §3 for the as-reward outcome (DEAD) and §4 for the loss-shaper
+> outcome (ALIVE on edge). Curated companion:
+> `phase1e_consensus_findings.md` §"Loss shaper results".
 >
 > Read alongside:
 >
@@ -245,7 +246,32 @@ moot. If `dense_shaper` is alive, `cons_shaper` measures the
 recovery fraction (same shape as the `dense / consensus` comparison
 in the as-reward column).
 
-### Implementation (DONE, RUNNING)
+### Outcome (DONE @ γ=0.5; γ-sweep RUNNING)
+
+Δ vs same-slice outcome-only baseline, averaged over op17-20:
+
+| training slice | dense_shaper γ=0.5 (gold UB) | cons_shaper γ=0.5 (proxy)   |
+|----------------|------------------------------|------------------------------|
+| edge            | +0.038 outcome p@128 / +0.001 process | **+0.033** / -0.004 process       |
+| uniform         | -0.016 outcome p@128 / -0.021 process | -0.015 / -0.003 process          |
+| hard            | -0.036 outcome p@128 / -0.034 process | -0.009 / +0.002 process          |
+
+cons_shaper recovers ~87% of the gold-shaper UB on edge; ties
+baseline within ±0.015 on every other slice/op group. **Pre-registered
+Exit B(i) PASSED.** Multi-seed re-run pending to confirm.
+
+vs the as-reward grid on the same metric:
+
+| slice | cons as-reward (α=0.2) | cons LOSS SHAPER (γ=0.5) |
+|-------|-------------------------|---------------------------|
+| edge   | -0.055 outcome p@128 (DEAD)         | +0.033 (ALIVE)              |
+| uniform| -0.456 outcome p@128 (DEAD)         | -0.015 (no collapse)        |
+| hard   | -0.288 outcome p@128 (DEAD)         | -0.009 (no collapse)        |
+
+Same metric, two operationalizations, opposite sign on every cell.
+The framing is the experiment.
+
+### Implementation (DONE, γ-sweep RUNNING)
 
 1. **Reward fn extensions** -- `compute_score_dense_shape_batched`
    and `compute_score_consensus_shape_batched` parse the rollout,

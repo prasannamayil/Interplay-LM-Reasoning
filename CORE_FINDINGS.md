@@ -16,7 +16,7 @@
 | `results/phase1c_findings.md`       | Phase 1c (within-prompt + per-Define-step decomposition) full tables — 18 ckpts × 19 ops × 25 signal slots           | ~2400 lines |
 | `results/base_entropy_spatial_findings.md` | Phase 1c follow-up: spatial decomposition of the per-step BASE entropy ρ. Shows the +0.29 is a structural artifact of the Define-line layout, not a generic mechanism — math-content region (rhs of `=`) has ρ = **−0.61** on op17 BASE. | ~140 lines |
 | `results/phase1d_findings.md`       | Phase 1d (SDPO feedback-augmented log-prob deltas) full tables                                                       | ~1000 lines |
-| `results/phase1e_consensus_findings.md` | Phase 1e step A — step-level sibling consensus as a process-reward proxy. Within-rollout median ρ +0.6..+0.8 on hard ops in BASE and all 4 trained runs, surviving the mixed-outcome confound check. **Currently the single largest within-rollout positive signal in the proxy programme.** | ~190 lines |
+| `results/phase1e_consensus_findings.md` | Phase 1e step A — step-level sibling consensus as a process-reward proxy. Metric: within-rollout median ρ +0.6..+0.8 on hard ops. Training: as-rollout-reward DEAD on 8 cells (collapsed); **as per-token loss shaper ALIVE on edge** (cons_shaper +0.033 hard outcome p@128, ~87% recovery of matched dense_shaper UB; sign-preserving; no collapse anywhere). First positive deployable proxy result. | ~340 lines |
 | `results/phase1e_contrastive_findings.md` | Phase 1e step C — per-step contrastive log-likelihood vs sibling-proposed values. **ABANDONED at this scale** (sample-size collapse, algebraic-rhs confound). Doc preserves the diagnosis + design notes for a future re-attempt. | ~150 lines |
 | `results/phase2_findings.md`        | Phase 2 (dense `process_reward` training upper bound) summary, links to `dense_process_report.md` for op2..20 tables | ~150 lines  |
 | `results/REWARD_DEFINITIONS.md`     | Self-contained, code-grounded definitions of `outcome_reward`, `process_reward`, `step_correct`, gold graph, and the outcome-class classification. Read this once if those terms are unclear. | ~120 lines |
@@ -101,6 +101,26 @@ of within-prompt per-rollout token-level shapers is empirically
 exhausted at our scale. **The bottleneck is recovery from rollouts,
 not the existence of signal in `process_reward`.**
 
+6. **Phase 1e (loss shaper): cons_nc as a per-token loss shaper —
+   FIRST POSITIVE DEPLOYABLE RESULT.** After the cons-as-rollout-
+   reward attempts collapsed (popular-wrong cluster contaminates the
+   within-prompt advantage), we pivoted to a sign-preserving per-token
+   loss shaper: `loss[t] = (1 + γ·signal[step(t)]) · A_outcome_i ·
+   log_p_ratio[t]`. The per-step signal can be gold `step_correct`
+   (sandbox UB) or sibling `cons_nc` (deployable proxy). At γ=0.5 on
+   the matched 3-slice grid: cons_shaper lifts edge hard outcome
+   p@128 by **+0.033** (recovers ~87% of the matched dense_shaper
+   +0.038), ties baseline within ±0.015 on every other slice/op.
+   The pre-registered Exit B(i) criterion (≥ +0.02 on at least one
+   cell) passed. Caveat: the shaper framing's UB on hard slice
+   (dense_shaper -0.036) is much weaker than the as-reward UB
+   (dense_a02 +0.31) — the shaper amplifies a sparse outcome
+   gradient instead of providing a continuous reward source.
+   Headline: **same metric (cons_nc), two operationalizations: as
+   rollout-reward it collapses; as per-token loss shaper it
+   tracks the gold upper bound at the slice where the framing
+   has signal.** The framing IS the experiment.
+
 ## 3. The mechanistic story (the one thing to remember)
 
 GRPO subtracts the within-prompt mean from each rollout's reward
@@ -150,7 +170,8 @@ across BASE and all trained runs.)
 
 | candidate                                                                                               | within-rollout ρ on hard ops (gold-grounded)             | regime where alive                          | implementation                                                                   | expected ceiling                                               |
 | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| **Step-level sibling consensus** (`cons_nc`) — *metric ALIVE; rollout-level training DEAD; loss-shaper RUNNING* | +0.60 to +0.80 on op7..20 within-rollout (per-step granularity) | per-step granularity only; rollout-mean cons is FLIPPED on op17 mixed prompts in 3/4 baselines (cons(correct) ≈ cons(wrong); see `phase1e_consensus_findings.md` §"Why training failed") | as-rollout-reward at α∈{0, 0.2}: DEAD on 8 cells. **Pivoted to per-token loss shaper** (`compute_score_consensus_shape_batched` + trainer hook `_apply_loss_shape_to_advantages`); sign-preserving by construction (outcome anchors gradient direction). Running on `run_loss_shaper_node2.sh` matched 1:1 with `dense_shaper` upper bound on Node 1. | NEW — see `phase1e_consensus_findings.md` and `proposed_phase1e_training.md` §4 for the loss-shaper plan. |
+| **`cons_nc` as per-token loss shaper** — first positive deployable proxy result | per-step ρ +0.60 to +0.80 on op7..20 within-rollout (the granularity the shaper consumes) | edge slice op17-20: cons_shaper +0.033 outcome p@128 over baseline (~87% recovery of matched dense_shaper +0.038); ties baseline ±0.015 on uniform / hard / id (no collapse anywhere) | `compute_score_consensus_shape_batched` (proxy) + `compute_score_dense_shape_batched` (UB) emit per-rollout `shape_factor_per_token = 1 + γ·signal[step(t)]`; trainer hook `_apply_loss_shape_to_advantages` post-multiplies advantages right after `compute_advantage`. Sign-preserving by construction. | dense_shaper UB +0.038 on edge hard at γ=0.5; γ-sweep at γ∈{1,2} pending. **Note**: shaper UB << dense-as-reward UB on hard slice (-0.036 vs +0.31) — the framing has lower headroom because it amplifies binary outcome gradient instead of providing continuous reward. |
+| ~~Step-level sibling consensus as rollout-level reward~~ | metric: same +0.6-0.8 ρ | DEAD on 8 cells across 4 slices × 2 reward configs | as-rollout-reward at α∈{0, 0.2} | mechanism: cons(correct) ≈ cons(wrong) on op17 mixed prompts in 3/4 baselines; popular-wrong cluster dominates within-prompt advantage. See `phase1e_consensus_findings.md` §"Why training failed". |
 | SDPO-style `prefix_gold_2` / `prefix_sibling_2` advantage augmentation on op19-20 mixed-outcome prompts | +0.10 to +0.20                                           | mixed-outcome only; dead on all-wrong       | hybrid SDPO+GRPO recipe (SDPO paper §4.5)                                        | strictly bounded; can't break out of zero-variance             |
 | Dense `process_reward` as training reward (sandbox-only) — **paper-α=0.2 blend is the new headline cell** | +0.06 to +0.08 process at α=0; **+0.31 outcome p@128 on hard slice op17-20 at paper α=0.2** | every regime (sandbox-only — requires gold) | `compute_score_process_only` (α=0) or `compute_score_dense_blend(alpha=0.2)` (paper recipe `R = 0.2*outcome + 0.8*process`) | this is the **upper bound** any deployable method has to clear |
 
@@ -302,7 +323,7 @@ diagnosis and design notes for a future re-attempt.
 
 The remaining sequencing (in priority order):
 
-1. **Loss shaper experiment (running, results expected by morning).**
+1. **Loss shaper experiment (DONE @ γ=0.5, γ∈{1,2} sweep next).**
    Phase 1e cons-as-rollout-reward died on all 8 cells of the
    matched as-reward grid (pure α=0 collapsed; paper-α=0.2 also
    collapsed on hard ops). Definitive mechanistic diagnosis: on op17
@@ -313,20 +334,35 @@ The remaining sequencing (in priority order):
    outcome p@128 on op17-20, the largest dense-process delta in
    the v4 fleet.
 
-   **Pivot: per-token loss shaper.** Sign-preserving by construction:
-   outcome anchors gradient direction (via standard GRPO advantage),
-   signal only redistributes per-token magnitude. The per-step
-   within-rollout ρ +0.6-0.8 phase1e validated lives at exactly
-   the granularity the shaper consumes. Implementation:
-   `verl/reward_fn.py::compute_score_{dense,consensus}_shape_batched`
-   emit `shape_factor_per_token = 1 + γ·signal[step(t)]` per rollout;
-   trainer hook `_apply_loss_shape_to_advantages` post-multiplies
-   `batch.batch["advantages"]`. Drivers:
-   `scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh` (2 nodes
-   × 3 cells each = ~10 hr each). Node 1 = dense_shaper (gold,
-   sandbox upper bound for the shaper framing); Node 2 =
-   cons_shaper (deployable proxy). Same eval pass@128 against
-   gold-process so cells compare 1:1 with every existing v4 row.
+   **Pivot: per-token loss shaper, γ=0.5 — RESULT.** Sign-preserving
+   by construction: outcome anchors gradient direction (via standard
+   GRPO advantage), signal only redistributes per-token magnitude.
+   On the matched 3-slice grid (`run_loss_shaper_node{1,2}.sh`):
+
+   | slice    | dense_shaper Δ outcome p@128 hard ops | cons_shaper Δ outcome p@128 hard ops |
+   |----------|----------------------------------------|---------------------------------------|
+   | edge     | **+0.038**                             | **+0.033** (~87% of dense_shaper)      |
+   | uniform  | -0.016 (saturated)                     | -0.015 (saturated)                    |
+   | hard     | -0.036                                 | -0.009                                |
+
+   `cons_shaper` is the first deployable cell to clear the
+   pre-registered Exit B(i) +0.02 threshold (edge hard +0.033),
+   AND ties baseline within ±0.015 on every other slice/op group
+   (no collapse anywhere — vs cons_a02 which catastrophically
+   collapsed −0.456 on uniform hard / −0.288 on hard hard). The
+   sign-preserving construction works exactly as designed.
+
+   Implementation in `verl/reward_fn.py::compute_score_{dense,
+   consensus}_shape_batched` emits per-rollout
+   `shape_factor_per_token = 1 + γ·signal[step(t)]`; trainer hook
+   `verl/trainer/ppo/ray_trainer.py::_apply_loss_shape_to_advantages`
+   post-multiplies `batch.batch["advantages"]`.
+
+   **γ-sweep next.** `run_loss_shaper_node{1_g1,2_g2}.sh` runs
+   γ∈{1.0, 2.0} on edge + hard for both signals (8 cells, ~13 hr/
+   node) to find the saturation knee. Multi-seed re-run on edge
+   cons_shaper γ=0.5 is the second priority (need a 2nd seed to
+   confirm +0.033 isn't a favorable run).
 2. **Cross-dataset replication of `cons_nc` on GSM8K / MATH-500.**
    The load-bearing "does this scale to discovery?" test. The score
    is "fraction of K-1 siblings that produce the same intermediate
@@ -347,8 +383,8 @@ publishable as the load-bearing scaling claim.
 | exit                                                             | shape                                                                                                                                                                                        | what it requires beyond what we already have                                                   |
 | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | **A — Negative result + sandbox methodology paper (safe floor)** | "we tested every per-rollout token-level signal in this family on a verifiable-process sandbox; none has within-prompt ρ; dense `process_reward` is exploitable but only sandbox-deployable" | Nothing — the data + decomposition methodology is publishable as-is.                           |
-| **B — Negative result + modest positive**                        | Exit A + one of: (i) `cons_nc` shaper from `proposed_phase1e_training.md` clearing ≥ +0.02 outcome at op17-20 on at least one training cell; (ii) GRPO + SDPO `prefix_gold_2` advantage on op19-20 mixed clearing the noise floor.       | (i): ~30 GPU-hr for the 6-cell run matrix + 1 day to wire `loss_mode: consensus_shape` into verl. (ii): same training cost, signal already validated. |
-| **C — Positive Phase-2 method (the best case)**                  | `cons_nc` shaper alive in-sandbox (from B(i)) AND `cons_nc` ρ on GSM8K within-rollout median ≥ +0.30 with the mixed-outcome sanity check passing — see `proposed_gsm8k_scaling_plan.md`. | Sandbox training (B(i)): ~30 GPU-hr. GSM8K replication: ~1 week of work + ~12 GPU-hr for rollouts. Total ≈ 2 weeks. |
+| **B — Negative result + modest positive (PASSED B(i))**          | Exit A + (i) `cons_nc` per-token loss shaper clearing ≥ +0.02 outcome at op17-20 on at least one training cell. **DONE: cons_shaper γ=0.5 edge hard +0.033 outcome p@128, ties baseline elsewhere (no collapse).** Pending multi-seed confirmation. | (i): ~13 GPU-hr/node, results in hand. Need a 2nd seed on edge γ=0.5 to confirm noise level. |
+| **C — Positive Phase-2 method (the best case)**                  | `cons_nc` shaper alive in-sandbox (B(i) PASSED) AND `cons_nc` shaper alive on GSM8K (within-rollout median ρ ≥ +0.30 with the mixed-outcome sanity check passing — see `proposed_gsm8k_scaling_plan.md`). | GSM8K replication: ~1 week of work + ~12 GPU-hr for rollouts. Total remaining ≈ 2 weeks. |
 
 
 The shared first half of every exit version is identical: the v3/v4/v5
@@ -377,15 +413,21 @@ Exit A + the SDPO prefix-gold hybrid (B(ii)).
   - **Step A as-rollout-reward training: DONE and DEAD** (8 cells
     across 4 slices × 2 reward configs). Mechanism documented in
     `phase1e_consensus_findings.md` §"Why training failed".
-  - **Step A loss shaper: RUNNING.** Reward fns
-    `compute_score_{dense,consensus}_shape_batched` emit per-token
-    `shape_factor_per_token`; trainer hook
-    `_apply_loss_shape_to_advantages` post-multiplies advantages.
-    Drivers `scripts/gsm_infinity_rl/run_loss_shaper_node{1,2}.sh`
-    (2 nodes × 3 cells × ~3.25 hr = ~10 hr / node). Results expected
-    in next analysis cycle.
-  - Then (after loss shaper lands): **cross-dataset replication on
-    GSM8K / MATH-500** (`proposed_gsm8k_scaling_plan.md`).
+  - **Step A loss shaper γ=0.5: DONE on 6 cells.** Result:
+    cons_shaper edge hard outcome p@128 +0.033 (~87% recovery of
+    matched dense_shaper +0.038); ties baseline ±0.015 on every
+    other slice/op group (no collapse). Pre-registered Exit B(i)
+    PASSED.
+  - **Step A loss shaper γ-sweep: RUNNING.** γ∈{1.0, 2.0} on edge
+    + hard for both signals via
+    `scripts/gsm_infinity_rl/run_loss_shaper_node{1_g1,2_g2}.sh`
+    (4 cells / node × ~3.25 hr = ~13 hr / node). Tests the
+    saturation knee of the shaper framing.
+  - **Multi-seed confirmation** of cons_shaper γ=0.5 on edge slice
+    pending (one extra seed; +0.033 is small enough to need
+    confirmation under the empirical ±0.005-0.010 noise floor).
+  - Then: **cross-dataset replication on GSM8K / MATH-500**
+    (`proposed_gsm8k_scaling_plan.md`) — Exit C trigger.
 - **Phase 1d on hard / uniform / BASE.** Only `grpo_edge_v4` has the
 Phase-1d sidecars (`rollouts_with_feedback_kl.jsonl`). Running
 `bash scripts/gsm_infinity_rl/run_phase1d.sh` will pick them up
@@ -410,7 +452,9 @@ reference dump.
 
 ---
 
-*Last updated: 2026-05-12 (after Phase 1c broad sweep across BASE /
+*Last updated: 2026-05-15 (Phase 1e loss shaper γ=0.5 DONE -- cons_shaper
+edge hard +0.033 outcome p@128, first positive deployable proxy result).
+Earlier: 2026-05-12 (after Phase 1c broad sweep across BASE /
 hard / uniform / 18 ckpts × 19 ops and independent re-verification of
 every headline number from raw sidecars via
 `scripts/gsm_infinity_rl/reverify_all.py`. Then again after the

@@ -139,9 +139,38 @@ pairs.
    accept the negative result for deployable methods and write up the
    sandbox-methodology paper.
 
+## Phase 2 follow-on: paper-recipe blend (alpha=0.2) + per-token loss shaper
+
+After this dense-process work, two further experiments built on the
+upper-bound result:
+
+### Paper-recipe blend (alpha=0.2)
+
+`compute_score_dense_blend(alpha=0.2)`: R = 0.2*outcome + 0.8*process,
+no gate (matches the "Interplay" paper Eq. 3). Runs on all 4 training
+slices (`grpo_*_v4_dense_a02`). Hard slice headline:
+`grpo_hard_v4_dense_a02` lifts hard outcome p@128 by **+0.31** over
+the hard-only-outcome baseline -- biggest delta in the v4 fleet.
+
+### Loss shaper (sandbox UB at the per-token framing)
+
+`compute_score_dense_shape_batched(gamma=0.5)`: score = outcome plus
+a per-token shape_factor = 1 + gamma*step_correct[step(t)] consumed
+by `_apply_loss_shape_to_advantages` after `compute_advantage`.
+
+Result: dense_shaper lifts edge hard outcome p@128 by +0.038; ties
+baseline elsewhere. Shaper UB is much weaker than the as-reward UB
+on hard slice (-0.036 vs +0.31) because the shaper amplifies a sparse
+outcome gradient instead of providing a continuous reward source.
+Important for the proxy programme: cons_shaper recovers ~87% of
+dense_shaper on edge, while the matching as-reward cons_a02
+collapsed (-0.456 on uniform / -0.288 on hard). See
+`phase1e_consensus_findings.md` for the matched 2x3 grid.
+
 ## Next steps
 
-See `CORE_FINDINGS.md` §"Next steps" for the active Phase-2 candidate
-list. The dense-process result re-opens the proxy programme by
-establishing that the achievable upper bound is real and non-trivial.
+See `CORE_FINDINGS.md` for the active sequencing. After the γ-sweep
+(running) lands, the next experiment is GSM8K cross-dataset
+replication of cons_shaper (`proposed_gsm8k_scaling_plan.md`) -- the
+load-bearing "does this scale to discovery?" test.
 
