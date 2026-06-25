@@ -123,5 +123,5 @@ where, specifically, would that show up?
 - Keep the PI's realistic-distribution priority central; flag when a promising
   result is toy-only.
 - Output as markdown suitable to drop into the repo (e.g.
-  `results/research_sweep_findings.md`).
+  `RESEARCH_SWEEP_FINDINGS.md`).
 </content>

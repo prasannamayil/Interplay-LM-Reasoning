@@ -1,13 +1,13 @@
 # Research Proposal — The Training Factorization as a Lever for Generalization (Diffusion / MTP vs AR on Realistic Data)
 
 > **Status: living document. PI: Prasanna Mayilvahanan.** Rewritten 2026-06-25 after the
-> literature sweep (`results/research_sweep_findings.md`) and a design discussion. The plan below
+> literature sweep (`RESEARCH_SWEEP_FINDINGS.md`) and a design discussion. The plan below
 > is ordered **by execution**: a new agent should start at Phase 0 and work down. Each experiment
 > specifies models, **all candidate training/eval datasets**, the measurement + decoding protocol,
 > a rough compute estimate (single node, 8× A100/H100, no multinode), and a pre-registered decision
 > rule.
 >
-> Companion docs: `DLLM_PROJECT_GUIDE.md` (orientation), `results/research_sweep_findings.md`
+> Companion docs: `DLLM_PROJECT_GUIDE.md` (orientation), `RESEARCH_SWEEP_FINDINGS.md`
 > (annotated bibliography + measurement recommendation), `results/LINE_A_NLL_FINDINGS.md` (Line-A
 > eval validity + Exp 1 commands), `results/DIFFUSION_GSM_VARNAME_PROBLEM.md` (decoding confound),
 > `scripts/TRAINING_SPEEDUP_STATUS.md` (throughput).
