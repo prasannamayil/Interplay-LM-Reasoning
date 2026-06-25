@@ -1,0 +1,67 @@
+# Matched-setting preliminary "widen the line" experiment on GSM-Infinity.
+# Small (~125M) so 1-GPU jobs schedule easily on a crowded cluster and finish in a
+# few hours. ALL architectures use this identical config (only arch_type and gqa's
+# n_kv_heads differ), so an ID->OOD accuracy comparison is apples-to-apples.
+# Effective batch: 24 x 4 accum x 1 GPU x 1024 = ~98k tokens/step; 6000 steps ~= 0.59B tok.
+
+name: "widen_exp_gsm"
+steps: 6000
+seed: 42
+grad_acc_steps: 4
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup: 200
+  lr_min_ratio: 0.1
+  clip: 1.0
+
+distributed:
+  fsdp_type: no_shard
+  compile: false
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_heads: 4
+  weight_tying: false
+  attn_impl: sdpa
+  arch_type: dense
+  moe_num_experts: 8
+  moe_top_k: 2
+  moe_aux_coef: 0.01
+  looped_n_unique_layers: 4
+  looped_n_loops: 3
+  sliding_window: null
+  pattention_num_tokens: 768
+
+data:
+  root_dir: null
+  sources:
+    gsm_infinity: 100.0
+  batch_size: 24
+  prefetch_size: 32
+  seq_len: 1024
+  n_views: 2
+  load_async: true
+  add_bos: true
+  add_eos: true
+  tokenizer:
+    name: hf
+    path: null
+
+checkpoint:
+  dump:
+    every: 2000
+    keep: 5
+  eval:
+    every: 1_000_000
+    keep: 5
+
+logging:
+  freq: 50

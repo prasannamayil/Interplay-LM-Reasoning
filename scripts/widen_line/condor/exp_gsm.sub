@@ -1,0 +1,24 @@
+# Preliminary "widen the line" GSM-Infinity experiment: one 1-GPU job per arch.
+# Submit:  condor_submit_bid 100 scripts/widen_line/condor/exp_gsm.sub
+# Fixed dump dirs => resubmitting a preempted arch RESUMES from its checkpoint.
+# Proc order (for mapping in condor_q): 0=dense 1=gqa 2=moe 3=looped 4=tokenformer.
+request_cpus   = 8
+request_gpus   = 1
+request_memory = 64G
+request_disk   = 30G
+requirements   = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+
+environment = "ARCH=$(ARCH)"
+
+log_root = /fast/pmayilvahanan/condor_logs/widen/exp_$(ARCH)_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 28800
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/exp_run.sh
+getenv = True
+
+queue ARCH in (dense, gqa, moe, looped, tokenformer)
