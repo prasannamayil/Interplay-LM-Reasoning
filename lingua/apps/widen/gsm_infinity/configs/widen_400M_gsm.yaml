@@ -1,0 +1,74 @@
+# GSM-Infinity pre-training — apps.widen architecture zoo, ~400M reference scale.
+# arch_type is overridden per run via run_pretrain.sh (dense|gqa|moe|looped|sliding|
+# linear|tokenformer). Dense reference matches the Llama/Mamba/MTP 400M points so
+# all architectures lie on the same ID->OOD line when trained on identical data.
+#
+# Effective batch: 8/GPU x 8 accum x 8 GPUs x 2048 tokens ~= 1M tokens/step.
+# NOTE: compile is OFF because MoE's data-dependent routing breaks torch.compile;
+# dense/gqa/sliding may set distributed.compile=true for speed via CLI.
+
+name: "widen_400M_gsm"
+steps: 10_000
+seed: 42
+grad_acc_steps: 8
+
+optim:
+  lr: 1.0e-4
+  weight_decay: 0.1
+  warmup: 500
+  lr_min_ratio: 0.3
+  clip: 1.0
+
+distributed:
+  fsdp_type: full_shard
+  compile: false
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+model:
+  dim: 1024
+  n_layers: 26
+  n_heads: 16
+  n_kv_heads: 4
+  weight_tying: false
+  attn_impl: sdpa
+  arch_type: dense
+  # MoE (used when arch_type=moe)
+  moe_num_experts: 8
+  moe_top_k: 2
+  moe_aux_coef: 0.01
+  # Looped / Universal (used when arch_type=looped): effective depth = unique x loops
+  looped_n_unique_layers: 6
+  looped_n_loops: 4
+  # Sliding window (used when arch_type=sliding)
+  sliding_window: null
+  # Tokenformer (used when arch_type=tokenformer)
+  pattention_num_tokens: 1024
+
+data:
+  root_dir: null
+  sources:
+    gsm_infinity: 100.0
+  batch_size: 8
+  prefetch_size: 64
+  seq_len: 2048
+  n_views: 2
+  load_async: true
+  add_bos: true
+  add_eos: true
+  tokenizer:
+    name: hf
+    path: null
+
+checkpoint:
+  dump:
+    every: 1000
+    keep: 25
+  eval:
+    every: 100_000
+    keep: 10
+
+logging:
+  freq: 10

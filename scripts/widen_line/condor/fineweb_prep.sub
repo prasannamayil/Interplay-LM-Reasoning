@@ -1,0 +1,20 @@
+# Condor CPU job: prepare FineWeb-Edu 10BT for the realistic-prose widen line.
+# Submit:  condor_submit_bid 100 scripts/widen_line/condor/fineweb_prep.sub
+# Heavy download/shuffle; no GPU. ~hours. Output: /fast/pmayilvahanan/lm_datasets/.
+request_cpus   = 32
+request_gpus   = 0
+request_memory = 256G
+request_disk   = 600G
+
+log_root = /fast/pmayilvahanan/condor_logs/widen/fineweb_prep_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 86400
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/fineweb_prep.sh
+getenv = True
+
+queue 1

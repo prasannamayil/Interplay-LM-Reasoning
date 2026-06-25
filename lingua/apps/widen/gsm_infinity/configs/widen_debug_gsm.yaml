@@ -1,0 +1,65 @@
+# Tiny smoke-test config for apps.widen (1 GPU, ~30 steps). Validates that each
+# arch_type forwards/backwards, trains a few steps, and saves a checkpoint.
+# arch_type + arch knobs are overridden via run_pretrain.sh / smoke scripts.
+
+name: "widen_debug_gsm"
+steps: 30
+seed: 42
+grad_acc_steps: 1
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup: 5
+  lr_min_ratio: 0.3
+  clip: 1.0
+
+distributed:
+  fsdp_type: no_shard
+  compile: false
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+model:
+  dim: 256
+  n_layers: 4
+  n_heads: 8
+  n_kv_heads: 4
+  weight_tying: false
+  attn_impl: sdpa
+  arch_type: dense
+  moe_num_experts: 4
+  moe_top_k: 2
+  moe_aux_coef: 0.01
+  looped_n_unique_layers: 2
+  looped_n_loops: 2
+  sliding_window: null
+  pattention_num_tokens: 256
+
+data:
+  root_dir: null
+  sources:
+    gsm_infinity: 100.0
+  batch_size: 4
+  prefetch_size: 8
+  seq_len: 512
+  n_views: 2
+  load_async: true
+  add_bos: true
+  add_eos: true
+  tokenizer:
+    name: hf
+    path: null
+
+checkpoint:
+  dump:
+    every: 30
+    keep: 2
+  eval:
+    every: 100_000
+    keep: 2
+
+logging:
+  freq: 5

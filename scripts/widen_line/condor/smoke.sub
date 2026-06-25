@@ -1,0 +1,20 @@
+# Condor smoke test for apps.widen architecture zoo: 1 GPU, all archs, ~30 steps each.
+# Submit:  condor_submit_bid 100 scripts/widen_line/condor/smoke.sub
+request_cpus   = 8
+request_gpus   = 1
+request_memory = 96G
+request_disk   = 40G
+requirements   = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+
+log_root = /fast/pmayilvahanan/condor_logs/widen/smoke_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 5400
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/smoke_all.sh
+getenv = True
+
+queue 1
