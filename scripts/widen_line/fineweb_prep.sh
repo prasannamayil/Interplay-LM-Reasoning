@@ -13,5 +13,11 @@ export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/lingua:${PYTHONPATH:-}"
 
 echo "=== FineWeb-Edu 10BT prep -> ${DATA_DIR} ==="
 python --version
+
+# lingua's parquet->jsonl step needs datatrove; install if missing (raw download is cached).
+python -c "import datatrove" 2>/dev/null || {
+    echo "[prep] installing datatrove ..."
+    python -m pip install --quiet "datatrove[processing]" || python -m pip install --quiet datatrove
+}
 bash "${PROJECT_ROOT}/scripts/prepare_fineweb_data.sh" "${DATA_DIR}"
 echo "FINEWEB_PREP_DONE"
