@@ -1,5 +1,17 @@
 # GSM-Infinity: dLLM vs AR Generalization Experiments
 
+> This is **Line B** of the dLLM project (extrapolative / compositional-depth
+> generalization). For project orientation and Line A (NLL/accuracy trajectory
+> divergence on general SFT data), see
+> [`DLLM_PROJECT_GUIDE.md`](../DLLM_PROJECT_GUIDE.md).
+>
+> ⚠️ The variable-name collapse discussed throughout this log is **largely a
+> decoding-time artifact** (ablation-proven: `left_to_right`/`random` remasking +
+> more steps recover most of the high-op gap with no retraining). A dedicated
+> analysis with the ablation tables and the implications for AR-vs-diffusion math
+> comparisons is in
+> [`../results/DIFFUSION_GSM_VARNAME_PROBLEM.md`](../results/DIFFUSION_GSM_VARNAME_PROBLEM.md).
+
 ## Goal
 
 Compare **in-distribution vs out-of-distribution generalization trends** between diffusion LLMs (MDLM, BD3LM) and autoregressive models (Pythia AR, Mamba) on compositional math reasoning. Training on ops 2-10, evaluating on ops 2-20. We need the *trend* to differ, not absolute accuracy.

@@ -1,5 +1,16 @@
 # Generalization Trends: AR vs Diffusion LMs — Finetune Pipeline
 
+> ⚠️ **Eval-validity caveat (read before trusting any NLL-vs-NLL plot).** The
+> "core result" plot described below (`output_ultrachat_final.png`) is
+> **confounded** by a likelihood-incommensurability artifact: diffusion NLL was
+> computed with DUEL `duel_rule=prob_margin`, which is **order-optimistic** and
+> not commensurable with AR's exact left-to-right NLL. The robust signal lives in
+> **downstream accuracy** (already collected). See
+> [`results/LINE_A_NLL_FINDINGS.md`](../../results/LINE_A_NLL_FINDINGS.md) for the
+> verified methodology, the confound analysis, and **Experiment 1** (re-eval with
+> `duel_rule=left_to_right` — the first thing to run). Project orientation:
+> [`DLLM_PROJECT_GUIDE.md`](../../DLLM_PROJECT_GUIDE.md).
+
 ## Thesis
 
 When autoregressive LMs (Pythia, Mamba) and diffusion LMs (BD3LM, MDLM) are
