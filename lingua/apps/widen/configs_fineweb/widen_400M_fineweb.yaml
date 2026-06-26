@@ -4,7 +4,6 @@
 # apps/main/configs_fineweb/llama_400M_fineweb.yaml so dense == the Llama point.
 # Requires FineWeb data prepared at /fast/pmayilvahanan/lm_datasets/ first.
 
-dump_dir: null
 name: "widen_400M_fineweb"
 steps: 10_000
 seed: 42

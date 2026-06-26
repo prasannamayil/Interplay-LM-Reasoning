@@ -4,7 +4,6 @@
 # (the spread) for the OOD-vs-ID line. dense == the Llama reference point.
 # Effective batch: 8/GPU x 8 accum x 8 GPUs x 2048 = ~1.05M tokens/step; 8000 steps ~= 8.4B tok.
 
-dump_dir: null
 name: "widen_400M_fineweb_b"
 steps: 8000
 seed: 42
