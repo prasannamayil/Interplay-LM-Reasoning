@@ -5,7 +5,7 @@
 # Effective batch: 24 x 4 accum x 1 GPU x 1024 = ~98k tokens/step; 6000 steps ~= 0.59B tok.
 
 name: "widen_exp_gsm"
-steps: 6000
+steps: 12000
 seed: 42
 grad_acc_steps: 4
 
@@ -58,10 +58,10 @@ data:
 checkpoint:
   dump:
     every: 2000
-    keep: 5
+    keep: 20          # retain all checkpoints (2k..12k) for the multi-checkpoint "line" eval
   eval:
     every: 1_000_000
-    keep: 5
+    keep: 20
 
 logging:
   freq: 50

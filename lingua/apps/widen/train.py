@@ -344,6 +344,7 @@ def train(args: TrainArgs):
         nwords_since_last_log = 0
         time_last_log = timer()
         gc.collect()
+        saved = False  # ensure defined if we resume with step already == steps (loop skipped)
         while train_state.step < args.steps:
             # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1

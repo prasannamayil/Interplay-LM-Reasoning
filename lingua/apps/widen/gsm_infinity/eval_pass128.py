@@ -135,6 +135,7 @@ def evaluate(
     max_tokens: int = 65536,
     batch_size: int = 128,
     op_levels=None,
+    max_examples=None,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -156,6 +157,8 @@ def evaluate(
 
     print(f"Loading test data from {test_dir}")
     data_by_op = load_test_data(test_dir, op_levels=op_levels)
+    if max_examples is not None:
+        data_by_op = {op: ex[:max_examples] for op, ex in data_by_op.items()}
     total_examples = sum(len(v) for v in data_by_op.values())
     print(f"Loaded {total_examples} examples across ops: {sorted(data_by_op.keys())}")
     print(f"Batched generation: {batch_size} samples/call, max_tokens={max_tokens}")
@@ -235,6 +238,8 @@ def main():
                         help="Number of samples to generate per call")
     parser.add_argument("--op_levels", type=str, default=None,
                         help="Comma-separated op levels (default: all)")
+    parser.add_argument("--max_examples", type=int, default=None,
+                        help="Cap examples per op (default: all 200) to speed up multi-ckpt eval")
     args = parser.parse_args()
 
     op_levels = [int(x) for x in args.op_levels.split(",")] if args.op_levels else None
@@ -249,6 +254,7 @@ def main():
         max_tokens=args.max_tokens,
         batch_size=args.batch_size,
         op_levels=op_levels,
+        max_examples=args.max_examples,
     )
 
 
