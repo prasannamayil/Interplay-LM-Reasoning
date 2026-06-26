@@ -1,0 +1,14 @@
+# Tiny CPU job: render the widen-line comparison table + PNG.
+request_cpus = 2
+request_gpus = 0
+request_memory = 8G
+request_disk = 4G
+log_root = /fast/pmayilvahanan/condor_logs/widen/plot_$(ClusterId)
+error = $(log_root).err
+output = $(log_root).out
+log = $(log_root).log
+MaxTime = 1200
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/plot.sh
+getenv = True
+queue 1
