@@ -184,6 +184,8 @@ def read_jsonl(
                     offset=offset,
                     current_iter=current_iter,
                 )
+                if not line.strip():  # skip blank lines (FineWeb chunks contain some)
+                    continue
                 yield json.loads(line), state
 
 
