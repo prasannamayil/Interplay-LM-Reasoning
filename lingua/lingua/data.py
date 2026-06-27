@@ -186,7 +186,11 @@ def read_jsonl(
                 )
                 if not line.strip():  # skip blank lines (FineWeb chunks contain some)
                     continue
-                yield json.loads(line), state
+                try:  # skip malformed lines (chunk-boundary fragments / extra-data in FineWeb)
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                yield obj, state
 
 
 def loop_on_jsonl(
