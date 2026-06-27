@@ -13,8 +13,10 @@
 - **GSM-Infinity experiment: DONE (preliminary).** dense/gqa/moe **coincide** (universality
   signal holds). looped & tokenformer are **broken** (see below). GSM accuracy **saturates**
   → no spread → it's a "coincidence at a point," not a drawable line. Use FineWeb for the line.
-- **FineWeb-Edu Exp B (proposal scale, 400M, 8B tok, 8-GPU): debugged (4 data/config bugs
-  fixed), jobs queued.** This is the headline vehicle for the actual line.
+- **FineWeb-Edu Exp B (proposal scale, 400M, 8B tok, 8-GPU): debugged (5 data/config bugs
+  fixed), jobs queued.** Smoke confirms data-load + 30-step train + checkpoint WORK; final
+  smoke (cluster 17371305) validating the in-training cloze-eval path. This is the headline
+  vehicle for the actual line.
 - **13 commits are LOCAL on branch `dllm` and NOT pushed** (no SSH key on the login node).
   Run `git push origin dllm` from a machine with credentials.
 
@@ -28,6 +30,9 @@
    recover a stuck held job manually: `condor_release <id>`.
 3. **FineWeb chunks are ~1.7% malformed** (chunk-split cut records mid-line & mid-UTF-8-char).
    Patched lingua `read_jsonl` to skip blank/malformed lines + `open(errors="ignore")`.
+   Also: the fineweb harness config must NOT contain `compute_loss` (not in LMHarnessArgs) —
+   it crashes the in-training eval at step 2000. Total FineWeb bugs fixed: spurious holds,
+   `dump_dir: null`, blank lines, malformed/utf8 lines, `compute_loss` key (5).
 4. Submit jobs with `condor_submit_bid 100 <sub>`. NEVER run training/eval/python-tests on
    the login node — always HTCondor (see memory `no-login-node-compute`).
 
