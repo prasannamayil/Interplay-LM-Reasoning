@@ -71,7 +71,6 @@ logging:
 
 eval:
   harness:
-    compute_loss: true
     tasks:
       - hellaswag
       - piqa
