@@ -29,7 +29,12 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
-from apps.main.generate import (
+# Use the WIDEN generator: it is identical to apps.main.generate except it carries
+# the LoopedKVCache (per-loop K/V) needed for weight-tied looped generation. The
+# apps.main one keeps a single K/V slot per module -> looped greedy decode is garbage
+# (returns 0.0 on every op). model_cls is passed explicitly below, so this is otherwise
+# behaviour-identical for dense/gqa/moe/tokenformer.
+from apps.widen.generate import (
     PackedCausalTransformerGenerator,
     PackedCausalTransformerGeneratorArgs,
     load_consolidated_model_and_tokenizer,
@@ -136,6 +141,7 @@ def evaluate(
     batch_size: int = 128,
     op_levels=None,
     max_examples=None,
+    no_cache=False,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -152,8 +158,15 @@ def evaluate(
         max_gen_len=max_gen_len,
         max_tokens=max_tokens,
         dtype="bf16",
+        use_cache=not no_cache,
     )
     generator = PackedCausalTransformerGenerator(gen_args, model, tokenizer)
+    if no_cache:
+        # Faithful full-recompute decode (custom-mixer / latent-KV archs). Deterministic
+        # (temperature 0) so 1 sample == pass@1; we batch DISTINCT examples per call to
+        # amortize the O(L^2) cost. Forced n_samples=1.
+        assert n_samples == 1, "--no_cache is pass@1 only (deterministic decode)"
+        print(f"[no_cache] faithful recompute decode, batching {batch_size} distinct examples/call")
 
     print(f"Loading test data from {test_dir}")
     data_by_op = load_test_data(test_dir, op_levels=op_levels)
@@ -174,22 +187,33 @@ def evaluate(
 
         op_successes = []
 
-        for ex_idx, example in enumerate(tqdm(examples, desc=f"op={op}")):
-            prompt_text = build_prompt(example)
-            gold_answer = get_gold_answer(example)
+        if no_cache:
+            # Batch DISTINCT examples per generate() call (deterministic decode -> 1 sample
+            # per example = pass@1). This amortizes the cacheless recompute across the batch.
+            prompts = [build_prompt(e) for e in examples]
+            golds = [get_gold_answer(e) for e in examples]
+            for i in tqdm(range(0, len(prompts), batch_size), desc=f"op={op}"):
+                chunk = prompts[i : i + batch_size]
+                generation, _, _ = generator.generate(chunk)
+                for gen_text, gold in zip(generation, golds[i : i + batch_size]):
+                    op_successes.append((1, 1 if check_answer(gen_text, gold) else 0))
+        else:
+            for ex_idx, example in enumerate(tqdm(examples, desc=f"op={op}")):
+                prompt_text = build_prompt(example)
+                gold_answer = get_gold_answer(example)
 
-            n_correct = 0
-            remaining = n_samples
-            while remaining > 0:
-                bs = min(batch_size, remaining)
-                batch_prompts = [prompt_text] * bs
-                generation, _, _ = generator.generate(batch_prompts)
-                for gen_text in generation:
-                    if check_answer(gen_text, gold_answer):
-                        n_correct += 1
-                remaining -= bs
+                n_correct = 0
+                remaining = n_samples
+                while remaining > 0:
+                    bs = min(batch_size, remaining)
+                    batch_prompts = [prompt_text] * bs
+                    generation, _, _ = generator.generate(batch_prompts)
+                    for gen_text in generation:
+                        if check_answer(gen_text, gold_answer):
+                            n_correct += 1
+                    remaining -= bs
 
-            op_successes.append((n_samples, n_correct))
+                op_successes.append((n_samples, n_correct))
 
         op_metrics = {}
         for k in k_values:
@@ -240,6 +264,9 @@ def main():
                         help="Comma-separated op levels (default: all)")
     parser.add_argument("--max_examples", type=int, default=None,
                         help="Cap examples per op (default: all 200) to speed up multi-ckpt eval")
+    parser.add_argument("--no_cache", action="store_true",
+                        help="Faithful full-recompute decode (custom-mixer/latent-KV archs: "
+                             "mla/gla/mamba2/fastrnn). pass@1 only.")
     args = parser.parse_args()
 
     op_levels = [int(x) for x in args.op_levels.split(",")] if args.op_levels else None
@@ -255,6 +282,7 @@ def main():
         batch_size=args.batch_size,
         op_levels=op_levels,
         max_examples=args.max_examples,
+        no_cache=args.no_cache,
     )
 
 

@@ -4,6 +4,140 @@
 > `EXP3_WIDEN_LINE.md` (design), `RESEARCH_PROPOSAL.md` (Phase 3), and the memory note
 > `exp3-widen-line-2026-06.md`. This doc = what's done, what's running, what's broken,
 > and exactly how to resume.
+>
+> **The `## CURRENT STATE` section immediately below is the live read-first snapshot
+> (updated 2026-06-28). The older `## TL;DR` + `## 🔵/🟣 SESSION UPDATE` blocks further
+> down are HISTORY — read them only for the debugging backstory.**
+
+---
+## ✅ CURRENT STATE (2026-06-28) — READ THIS FIRST
+
+### The two lines, where each stands
+1. **GSM-Infinity line (extrapolative reasoning).** Easy/uniform `composition_lingua` data
+   SATURATES at ID~0.25 for every size -> no spread (that whole easy sweep was deleted).
+   **The fix that works: HARD-skewed data** (op8-10 = 50%, built from the op-stratified
+   `composition_hf/train/{2..10}`). On hard data, in-distribution accuracy (ops 2-10)
+   SCALES with size + tokens -> real spread (ID 0.32 -> 0.62+ and op2 up to ~0.89), and
+   **size now helps** (dense_s 25M >> dense_xs 5M). KEY FINDING: **OOD extrapolation has a
+   hard, architecture-invariant wall just past the trained max op (op10).** op12 still has a
+   decent capability-tracking spread (0.13 -> 0.36), op14 weak (0.08 -> 0.22), op16-20 dead
+   (~0.15 flat). So define **OOD = near-extrapolation (op11-14, ideally up to op12)**, NOT
+   ops 12-20 (which averages in the dead far-ops and looks flat). PI agreed: "decent up to
+   op12 is okay." Status: full hard sweep (5 archs x {xs,s,m,l,xl} x ckpt {4k,8k,12k}) +
+   a 2nd seed (s43, s/m/l x5) + near-OOD re-eval (op11-14) IN FLIGHT.
+2. **FineWeb-Edu line (realistic prose, 8-GPU, 400M).** This one spreads naturally (acc
+   grows with tokens). **dense DONE**: clean 4-ckpt trajectory, meanAcc 0.341->0.385 as
+   upstream logprob/tok -3.51->-3.07 (lambada .10->.21, arc_easy .40->.47). tokenformer/gqa/
+   looped training fine. **moe hit BUG #9 (8-GPU FSDP only):** reduce-scatter "expects uniform
+   gradient dtype but got {float32, bfloat16}". REAL root cause = **EMPTY EXPERTS**: with top-2/8
+   routing across 26 MoE layers, some expert gets ZERO tokens in a microbatch -> its params get
+   no grad -> FSDP fills the missing grad in fp32 -> mixed dtype. (The router `softmax(.float())`
+   was a red herring; changed to native-dtype anyway, harmless.) FIX = zero-magnitude touch of
+   ALL expert params each forward so every expert always gets a (0) bf16 grad
+   (`MoEFeedForward.forward`: `out = out + 0.0*sum(p.sum() for e in experts for p in e.parameters())`).
+   GOTCHA: a 2-GPU/6-layer smoke does NOT reproduce it (needs many layers to hit an empty
+   expert) -> validate with a **26-layer** 2-GPU smoke. 1-GPU GSM moe never reduce-scatters ->
+   unaffected (GSM moe results valid). 26L smoke PASSED -> moe FineWeb resumed (17372746).
+   **BUG #10 (tokenformer FineWeb in-training eval):** preemption mid-consolidation left
+   `checkpoints/<step>/consolidated/consolidated.pth` WITHOUT `params.json`; eval.py's old
+   `if not consolidate_path.exists()` skipped re-consolidation -> crash on missing params.json.
+   FIX (`apps/widen/eval.py launch_eval`): re-consolidate when `consolidated/params.json` is
+   missing (rm the partial dir first). Cleared bad dir + resumed tokenformer (17372748).
+   Total FineWeb bugs now = 10.
+
+### LIVE RESULTS (update as evals land)
+- **GSM hard, pass@1 — universality line HOLDS. ESSENTIALLY FINAL (seed1 20/20 + seed2
+  14/15, n=108, OOD=op11-14, op11/13 merged from eval_nearood).**
+  Global **OOD = 0.239*ID + 0.063, R^2=0.44, ID spread 0.416** (far-OOD ops12-20 = flat dead
+  wall, don't use). ID=mean(op2-10) spans 0.32->0.74; op2 up to ~0.89; op12 0.13->0.36.
+  **Universality (the result):** every arch's mean |residual to the ONE global line| is tiny
+  and similar — moe .016, looped .018, tokenformer .024, gqa .025, dense .033 (~the ±0.05
+  100-ex/op noise floor); all 5 archs span the same ID range (0.32-0.74). => 5 AR archs
+  COINCIDE on one near-OOD-vs-ID line with real spread. Global R^2~0.44 is NOISE-LIMITED
+  (small OOD dynamic range vs sampling noise), NOT a broken line — the coincidence (small
+  residuals) is the universality evidence, not the global R^2. Plot:
+  `exp_gsm_hard/widen_line_gsm_hard.png`. Only loose end: 1 seed2 job (moe/l s43) was hung,
+  killed; optional to requeue (won't change the result).
+- **FineWeb universality line (downstream meanAcc vs upstream logprob/tok) — CLEAN, the
+  strong result. 3/5 archs COMPLETE: dense, gqa, looped (4 ckpts each, n=12):**
+  **acc = 0.091*upstream + 0.661, R^2 = 0.988, archs INTERLEAVED** (gqa@k ~ dense@k). dense
+  final ck8000 meanAcc 0.385 / upstream -3.065. Clean (downstream benchmarks have real
+  dynamic range + low noise, unlike GSM's noisy OOD) -> headline universality line.
+  **LEFT: moe (rerun, see below) + tokenformer (near done, step ~7800) -> 5-arch line + plot.**
+
+### STATUS 2026-06-29 — DONE vs LEFT (for the NEW session)
+**ALL MONITORS ARE DEAD** (nothing auto-resubmits). condor_q is stale — trust the filesystem
+(`results/.../metrics*.jsonl`, recent `*.out` mtimes).
+
+DONE ✅
+- GSM hard sweep: seed1 20/20 + seed2 14/15 (n=108). Universality line FINAL (see LIVE RESULTS).
+- FineWeb: dense, gqa, looped = 4/4 ckpts each (3-arch line, R^2=0.988).
+- near-OOD op11-14: 12 ckpts merged into the GSM line.
+- All 10 FineWeb bugs + looped/tokenformer arch fixes: done & validated.
+
+RUNNING (as of handoff, verify)
+- tokenformer FineWeb `17372748` (8-GPU) ~step 7800/8000 — near done; its evals should appear
+  shortly (in-training eval at the end / it had 0 evals because earlier consolidation crashed,
+  now fixed).
+
+LEFT TO DO (NEW SESSION) — exact commands:
+1. **moe FineWeb** (the only blocker for the 5-arch FineWeb line). Last run `17372746` reached
+   step 1000 then DIED in the distributed-checkpoint save (DCP scatter collective — likely a
+   transient NCCL hiccup, NOT the empty-expert bug which is fixed). No ckpt saved -> restarts
+   from 0. Resubmit:  `condor_submit_bid 100 -a ARCH=moe scripts/widen_line/condor/fineweb_b_one.sub`
+   (~8-17h on 8 GPU). If it dies in DCP save again, it's transient — just resubmit.
+2. **Restart monitors** (auto-resubmit on preemption):
+   `ARCHS="moe tokenformer" nohup bash scripts/widen_line/monitor.sh fineweb &`
+   (gqa/looped/dense done; only moe/tokenformer need watching).
+3. When moe+tokenformer have eval points: `python analyze/widen_line_fineweb.py`  (5-arch line+plot).
+4. GSM is essentially final; optional: requeue the 1 hung seed2 (moe/l s43) if you want it:
+   `condor_submit_bid 100 -a ARCH=moe -a SIZE=l -a SEED=43 scripts/widen_line/condor/exp_gsm_hard.sub`
+   (won't change the result). near-OOD covered enough ckpts; rerun `nearood_eval.sub` only if
+   you want op11/13 on the last few ckpts.
+5. `git push origin dllm` (many commits local; no SSH key on login node).
+
+### MONITORS (background bg procs; die at session end -> relaunch in new session)
+- `ARCHS="moe tokenformer" bash scripts/widen_line/monitor.sh fineweb` (resubmit; dense/gqa/looped done)
+- `SIZES="xs s m l xl" bash scripts/widen_line/hard_monitor.sh` (GSM hard resubmit; only if requeuing GSM)
+- (In-session only) milestone/eval watchers via the Monitor tool.
+- GOTCHA: `pkill -f "monitor.sh X"` can match (and kill) your own shell whose cmdline contains
+  that string -> kill monitors by PID, not pattern.
+
+### SCRIPTS (all under scripts/widen_line/ unless noted)
+- GSM hard sweep: `exp_run_scaled.sh` (honors env DATA_ROOT/EXP_ROOT/STEPS/EVAL_CKPTS/SEED),
+  sub `condor/exp_gsm_hard.sub` (pass -a ARCH= -a SIZE= [-a SEED=]). Sizes xs/s/m/l/xl =
+  dim 256/512/768/1024/1536, n_layers 6/8/12/16/24.
+- Hard data build: `build_hard_skewed_data.py` + `condor/build_hard_skewed.sub` -> writes
+  `data/composition_lingua_hard/gsm_infinity/*.jsonl`. **Text format MUST be
+  `<question> {problem} {question} </question> <solution> {body} </solution> <answer> {gold} </answer>`**
+  (premises live in `problem`; eval extractor reads ONLY `<answer>..</answer>`; gold = number
+  after "Answer:" in the hf solution). Getting this wrong => 0.000 everywhere.
+- near-OOD: `nearood_eval.sh` + `condor/nearood_eval.sub` (ops 11-14 on existing ckpts).
+- FineWeb: `fineweb_run.sh` (8-GPU; sets distributed.dp_shard=NPROC + checkpoint.dump.every=1000),
+  sub `condor/fineweb_b_one.sub`.
+- Analysis: `analyze/widen_line_gsm_hard.py` (OOD-vs-ID over arch x size x ckpt, incl _s<seed>;
+  OOD=op11-14, auto-merges op11/13 from eval_nearood; far ops 16-20 excluded as dead wall),
+  `analyze/widen_line_fineweb.py` (downstream meanAcc vs upstream logprob/tok). Both final/ready.
+
+### GPU BUDGET (PI, 2026-06-28): total <= 60 GPUs; long jobs (8-GPU FineWeb, xl GSM) <= 24-32
+within that. Short 1-GPU GSM fills the rest. See memory `cluster-gpu-budget`.
+
+### PENDING / NEXT  (see "STATUS 2026-06-29 — DONE vs LEFT" above for exact commands)
+- [ ] **moe FineWeb** rerun (only blocker for the 5-arch FineWeb line) + restart monitors.
+- [ ] tokenformer FineWeb finish (running) -> 5-arch `widen_line_fineweb.py`.
+- [ ] GSM line is FINAL (n=108, universality holds); optional 1 hung seed2 requeue.
+- [ ] (PI optimizing diffusion separately -> SKIP diffusion-on-GSM.)
+- [ ] Optional: pass@k eval for higher absolute numbers (rl_modifiers used pass@128+GRPO).
+- [ ] `git push origin dllm` (many commits local, no SSH key on login node).
+
+### WHY size wasn't helping (the headline diagnosis for the PI's question)
+NOT capacity, NOT dataset-size (38GB avail). The training data lacked hard problems; rl_modifiers'
+good ~100M model used 10B tok + 0.2easy/0.3med/0.5hard mix (+ pass@128 + GRPO for its headline
+numbers). With hard exposure, size + tokens both lift hard-op accuracy. Extrapolation past the
+trained op range remains a wall for all AR archs (the interesting AR baseline; diffusion contrast
+is the eventual payoff, deferred).
+
+---
 
 ## TL;DR
 - Goal: show many AR architectures trained on identical data fall on ONE OOD-vs-ID line,
@@ -19,6 +153,72 @@
   vehicle for the actual line.
 - **13 commits are LOCAL on branch `dllm` and NOT pushed** (no SSH key on the login node).
   Run `git push origin dllm` from a machine with credentials.
+
+## 🔵 SESSION UPDATE 2026-06-27 (cont.) — broken archs fixed, FineWeb-B running
+- **tokenformer FIXED & validated.** `PattentionLinear.forward` softmax → official
+  Tokenformer Θ = **GeLU → L2-norm over param-tokens → ×√n** (value init √n keeps output
+  variance ~ nn.Linear). Retrain `17371310`: loss **0.038 @ step1950** (was stuck ~1.34).
+  File: `lingua/apps/widen/transformer.py`.
+- **looped FIXED (eval verdict pending).** Two parts: (1) added `LoopedKVCache` (one K/V
+  buffer per loop, picked by `_loop_idx` set in `WidenTransformer.forward`) in
+  `lingua/apps/widen/generate.py` + `clear_cache` uses it when `model.n_loops>1`; (2) **the
+  real gotcha** — `gsm_infinity/eval_pass128.py` imported the generator from
+  `apps.main.generate` (single-slot KVCache), so the widen fix never ran → still 0.0.
+  Repointed it to `apps.widen.generate` (model_cls passed explicitly, so dense/gqa/moe/tf
+  unaffected). Re-eval job `17371349`.
+- **FineWeb bug #6 (eval JSON) FIXED & validated** by 1-GPU smoke (`FW_SMOKE_DONE`):
+  `json.dumps(results)` died on lm-eval callables → added `default=handle_non_serializable`
+  to all 4 dumps in `eval.py`.
+- **FineWeb bug #7 (missing text/content key) FIXED.** Chunk-split makes some rows valid
+  JSON but with a text fragment AS the dict key (no text/content) → tripped the assert in
+  `data.py tokenize()` → killed the 8-GPU dataloader at ~1min. Extended `read_jsonl` skip
+  (now: blank / malformed / **no text-or-content** ). Measured 3 nokey + ~1.7% malformed per
+  300k lines. Total FineWeb bugs fixed = 7.
+- **FineWeb bug #8 (FSDP grad-clip DTensor) FIXED.** `clip_grad_norm_` computes the clip
+  coef on a *Partial* DTensor → redistribute→all_reduce can't resolve the mesh group
+  (`get_group_info: no group info associated with the group name`, empty name). Real torch
+  2.6.0 bug; `dp_shard=N` config alone does NOT fix it (2D HSDP mesh fails identically).
+  Fix = manual grad clipping on local shards with `all_reduce(MAX)` — copied verbatim from
+  `apps/mamba/train.py` (which already carried this exact workaround). Validated by a
+  **2-GPU full_shard smoke** (steps to 40, grad-clip OK). Also set `distributed.dp_shard=
+  NPROC` in fineweb_run.sh (correct single-node full_shard; avoids the auto-adjust that put
+  everything on the dp_replicate dim). The 1-GPU smoke missed #7/#8 (ran `no_shard`, few
+  lines) → now gate 8-GPU on `fineweb_smoke_mgpu.{sh,sub}` (2-GPU). Total FineWeb bugs = 8.
+- **FineWeb-B 8-GPU RELAUNCHED (the headline line vehicle), all fixes #6/#7/#8:** dense
+  `17371432`, moe `17371433`, tokenformer `17371434` (08:52). Superseded crashed clusters:
+  17371296/297/298 (bug#7), 17371364/365/366 (bug#8). Dumps
+  `results/widen_line/fineweb_b/widen_b_<arch>/`; eval trajectory in `metrics.eval.jsonl`.
+- **Analysis added:** `analyze/widen_line_fineweb.py` (downstream-vs-upstream universality
+  line, global R², per-task table) — mirrors `widen_line_compare.py`.
+- **Cleanup:** cancelled 11 stale/dup jobs (incl. 2 pre-fix tokenformer GSM jobs racing the
+  retrain's eval output). 2 auto-resubmit monitors running.
+- **Still TODO:** confirm looped pass@1>0 & tokenformer pass@1; let FineWeb-B reach evals
+  (step 2000+) then run the fineweb analysis; **bigger GSM models** (scale sweep) for higher
+  accuracy + a drawable line; `git push origin dllm` (commits still local).
+
+## 🟣 SESSION UPDATE 2026-06-27 (evening) — GSM spread + hard-skew pivot + cleanup
+- **GSM size-sweep (easy data) was FLAT** (xs..l all ID~0.25, op8-10 at floor) AND fast-
+  saturating (step 250 == step 12k). Neither size nor training-time moved it.
+- **Diagnosis:** training source `composition_lingua` under-represents hard ops (op8-10).
+  rl_modifiers' good ~100M model used a `0.2easy/0.3med/0.5hard` mix + 10B tok + pass@128 +
+  GRPO RL (its headline op14~0.7-0.8 is RL+pass@128, NOT base pass@1). Caveat: the
+  "no hard ops" claim used a Define-count proxy that compresses at high op (op8≈5 Defines);
+  composition_lingua has FEWER not ZERO hard problems. Hard-skew test is empirical.
+- **Built hard-skewed lingua source** `data/composition_lingua_hard/gsm_infinity` (14GB, 36
+  chunks, realized op fractions op2-4=.067 / op5-7=.10 / op8-10=.167 = 50% hard) via
+  `scripts/widen_line/build_hard_skewed_data.py` from the op-stratified `data/composition_hf/
+  train/{2..10}/op*_shard*.jsonl`. Text format `<question> .. </question> <solution> .. </solution>`.
+- **DELETED all easy-distribution GSM runs** (per PI: wrong distribution) — `exp_gsm`,
+  `exp_gsm_scaled`, `exp_gsm_ramp` (~354GB freed; widen_line 419->66GB). All easy-GSM jobs
+  killed + their monitors (scaled_monitor, monitor.sh gsm) stopped. FineWeb-B + fineweb
+  monitor untouched.
+- **LAUNCHED hard-skewed dense sweep** (the decisive lever test): dense × {xs,s,m,l}
+  (17371987-990), STEPS=12000, eval 4k/8k/12k, EXP_ROOT=`results/widen_line/exp_gsm_hard`,
+  DATA_ROOT=composition_lingua_hard (exp_run_scaled.sh now honors DATA_ROOT/EXP_ROOT/STEPS/
+  EVAL_CKPTS env; sub = `condor/exp_gsm_hard.sub`). If ID rises / op8-10 lift / sizes
+  separate -> fan out to all 5 archs. Else GSM ceiling is capability/scale -> FineWeb is the
+  line vehicle. Analysis `analyze/widen_line_gsm_scaled.py` (reads exp_gsm_scaled+ramp; point
+  it at exp_gsm_hard for the new runs).
 
 ## ⚠️ Cluster gotchas (these cost a day of debugging — internalize them)
 1. **`condor_q` returns STALE/cached results here.** Never trust an empty/absent query to

@@ -1,0 +1,13 @@
+request_cpus = 8
+request_gpus = 1
+request_memory = 96G
+request_disk = 40G
+requirements = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+log_root = /fast/pmayilvahanan/condor_logs/widen/diag_fastrnn_$(ClusterId)
+error = $(log_root).err
+output = $(log_root).out
+log = $(log_root).log
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/diag_fastrnn_run.sh
+getenv = True
+queue 1

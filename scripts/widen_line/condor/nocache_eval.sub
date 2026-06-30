@@ -1,0 +1,24 @@
+# Faithful no-cache GSM pass@1 eval for one (custom-mixer arch, size). 1 GPU.
+# Submit: condor_submit_bid 100 -a ARCH=mamba2 -a SIZE=s scripts/widen_line/condor/nocache_eval.sub
+request_cpus   = 8
+request_gpus   = 1
+request_memory = 96G
+request_disk   = 40G
+requirements   = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+
+SEED =
+environment = "ARCH=$(ARCH) SIZE=$(SIZE) SEED=$(SEED) EXP_ROOT=/lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/results/widen_line/exp_gsm_hard EVAL_CKPTS='4000 8000 12000'"
+
+log_root = /fast/pmayilvahanan/condor_logs/widen/nceval_$(ARCH)_$(SIZE)_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 57600
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/nocache_eval_run.sh
+getenv = True
+
+queue 1

@@ -121,6 +121,38 @@ class KVCache(nn.Module):
         return self.k_cache, self.v_cache
 
 
+class LoopedKVCache(nn.Module):
+    """KV cache for weight-tied looped/Universal transformers.
+
+    A looped model invokes the SAME attention module ``n_loops`` times per token,
+    and loop-i queries must attend to loop-i keys of earlier positions. A single
+    KVCache (one buffer per module) keeps only the last loop's K/V -> incremental
+    decode is garbage (loglikelihood/cloze, which recompute the full sequence, are
+    fine). This keeps an independent (k,v) buffer per loop, selected by the
+    externally-set ``_loop_idx`` (the model sets it before each layer call). The
+    update/return protocol is otherwise identical to KVCache, so the lingua
+    Attention forward and the generator's offset/tok_idx machinery are unchanged."""
+
+    def __init__(self, n_loops, bsz, seqlen, n_heads, head_dim, dtype, device):
+        super().__init__()
+        shape = (n_loops, bsz, seqlen, n_heads, head_dim)
+        self.register_buffer("k_cache", torch.zeros(shape, dtype=dtype, device=device))
+        self.register_buffer("v_cache", torch.zeros(shape, dtype=dtype, device=device))
+        self.offset = 0
+        self._loop_idx = 0
+
+    def reset(self):
+        self.k_cache.zero_()
+        self.v_cache.zero_()
+        self.offset = 0
+
+    def update(self, k_val, v_val, tok_idx):
+        li = self._loop_idx
+        self.k_cache[li].index_copy_(1, self.offset + tok_idx, k_val)
+        self.v_cache[li].index_copy_(1, self.offset + tok_idx, v_val)
+        return self.k_cache[li], self.v_cache[li]
+
+
 @dataclass
 class PackedCausalTransformerGeneratorArgs:
     temperature: float = 0.0
@@ -135,6 +167,10 @@ class PackedCausalTransformerGeneratorArgs:
     show_progress: bool = False
     dtype: Optional[str] = "bf16"
     device: Optional[str] = "cuda"
+    # When False, decode with a faithful no-KV-cache full-recompute loop instead of the
+    # incremental KVCache. Needed for custom-mixer / latent-KV archs (mla/gla/mamba2/
+    # fastrnn) whose state the KVCache cannot represent. Slower (O(L^2)) but correct.
+    use_cache: bool = True
 
 
 class PackedCausalTransformerGenerator:
@@ -167,6 +203,7 @@ class PackedCausalTransformerGenerator:
         self.max_gen_len = cfg.max_gen_len
         self.max_tokens = cfg.max_tokens
         self.max_prompt_len = cfg.max_prompt_len
+        self.use_cache = cfg.use_cache
         self.until = cfg.until
         self.max_until_size = max([len(e) for e in self.until]) if self.until else 1
         self.device = cfg.device
@@ -189,17 +226,32 @@ class PackedCausalTransformerGenerator:
         self.prefill_mask = None
 
     def clear_cache(self, offset):
+        # Weight-tied looped models call each attention n_loops times per token;
+        # they need a per-loop cache (see LoopedKVCache). All other archs use the
+        # standard single-slot KVCache.
+        n_loops = int(getattr(self.model, "n_loops", 1) or 1)
         for module in self.model.modules():
             if isinstance(module, Attention):
                 if not hasattr(module, "kv_cache"):
-                    module.kv_cache = KVCache(
-                        1,
-                        self.max_tokens,
-                        module.n_kv_heads,
-                        module.head_dim,
-                        self.dtype,
-                        self.device,
-                    )
+                    if n_loops > 1:
+                        module.kv_cache = LoopedKVCache(
+                            n_loops,
+                            1,
+                            self.max_tokens,
+                            module.n_kv_heads,
+                            module.head_dim,
+                            self.dtype,
+                            self.device,
+                        )
+                    else:
+                        module.kv_cache = KVCache(
+                            1,
+                            self.max_tokens,
+                            module.n_kv_heads,
+                            module.head_dim,
+                            self.dtype,
+                            self.device,
+                        )
                 module.kv_cache.offset = offset
 
     @torch.compiler.disable
@@ -320,7 +372,84 @@ class PackedCausalTransformerGenerator:
         return out
 
     @torch.inference_mode()
+    def generate_nocache(self, prompts):
+        """Faithful generation WITHOUT a KV cache: re-run the full forward over the whole
+        growing sequence at every step. This is exactly the training forward path, so it
+        is correct for ANY mixer (softmax attention, latent-KV MLA, SSM/Mamba, gated-RNN)
+        — unlike the incremental KVCache decode, which only caches `Attention` modules and
+        so silently corrupts the custom mixers.
+
+        Prompts are batched as RIGHT-padded rows (one prompt per row; no cross-doc
+        packing). We only ever read logits at each row's TRUE last position, and with a
+        pure causal mask a read position never attends to the trailing padding (it is
+        strictly in the future); the recurrent scans likewise never read across the
+        padding. So right-pad + causal is faithful for every arch. O(L^2) in sequence
+        length but batched across prompts, which keeps it tractable for short GSM gens.
+        """
+        device = self.device
+        enc = [self.tokenizer.encode(p, add_bos=True, add_eos=False) for p in prompts]
+        max_seqlen = getattr(self.model, "max_seqlen", None) or self.max_tokens
+        max_prompt_len = self.max_prompt_len or min(
+            max_seqlen - self.max_gen_len, self.max_tokens - self.max_gen_len
+        )
+        enc = [p[-max_prompt_len:] for p in enc]
+        n = len(enc)
+        lengths = [len(p) for p in enc]
+        cap = min(max_seqlen, max(lengths) + self.max_gen_len)
+        # fastrnn's accelerated_scan (warpscan) kernel only accepts a forward seqlen that
+        # is a power of 2 and >= 32. We round the forward width up to satisfy it; harmless
+        # because we only ever read each row's true last position (the extra width is
+        # future padding). max_seqlen (=trained seq_len, 1024) is a power of 2, so the
+        # rounded width never exceeds the RoPE table / token buffer.
+        pow2 = getattr(self.model, "arch_type", "") == "fastrnn"
+        _np2 = lambda x: 1 if x < 1 else (1 << (x - 1).bit_length())
+        buf = min(max(32, _np2(cap)), max_seqlen) if pow2 else cap
+        pad_id = self.tokenizer.eos_id  # arbitrary valid id; never read (see docstring)
+        toks = torch.full((n, buf), pad_id, dtype=torch.long, device=device)
+        for i, p in enumerate(enc):
+            toks[i, : len(p)] = torch.tensor(p, dtype=torch.long, device=device)
+        cur = torch.tensor(lengths, dtype=torch.long, device=device)  # per-row length
+        gen_tokens = [[] for _ in range(n)]
+        is_done = [bool(lengths[i] >= cap) for i in range(n)]
+        rows = torch.arange(n, device=device)
+
+        for _ in range(self.max_gen_len):
+            width = int(cur.max().item())
+            if width >= cap:
+                break
+            fwd_w = min(max(32, _np2(width)), buf) if pow2 else width
+            logits = self.model.forward(
+                toks[:, :fwd_w], tok_idx=None, mask=None, attn_impl="sdpa"
+            )  # (n, fwd_w, vocab)
+            last = logits[rows, cur - 1]  # (n, vocab) — each row's true last position
+            nxt = sample_tokens(last, self.temperature, self.top_p, self.top_k).tolist()
+            any_active = False
+            for i in range(n):
+                if is_done[i]:
+                    continue
+                tok = nxt[i]
+                toks[i, cur[i]] = tok
+                cur[i] += 1
+                gen_tokens[i].append(tok)
+                tail = self.tokenizer.decode(gen_tokens[i][-self.max_until_size :])
+                is_done[i] = (
+                    any(e in tail for e in self.until)
+                    or tok == self.tokenizer.eos_id
+                    or int(cur[i]) >= cap
+                )
+                any_active = any_active or not is_done[i]
+            if not any_active:
+                break
+
+        generation = [self.tokenizer.decode(g) for g in gen_tokens]
+        # loglikelihood / greedy are unused by the GSM pass@k eval; return empty to match
+        # the cached generate() signature.
+        return generation, [], []
+
+    @torch.inference_mode()
     def generate(self, prompts):
+        if not self.use_cache:
+            return self.generate_nocache(prompts)
         # Tokenize
         prompts = [
             self.tokenizer.encode(p, add_bos=True, add_eos=False) for p in prompts
