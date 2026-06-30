@@ -190,6 +190,11 @@ def read_jsonl(
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # skip valid-JSON rows that lack a text/content field (some FineWeb
+                # chunk rows do) -> would otherwise trip the assert in tokenize() and
+                # kill the whole dataloader. Mirrors the blank/malformed skips above.
+                if not isinstance(obj, dict) or ("text" not in obj and "content" not in obj):
+                    continue
                 yield obj, state
 
 

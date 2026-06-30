@@ -1,0 +1,28 @@
+# From-scratch diffusion (matched to widen AR line), one 8-GPU full-node job.
+# Submit e.g.:
+#   condor_submit_bid 40 -a OBJ=bd3lm -a SIZE=400M scripts/diffusion_match/condor/train.sub
+# Fixed dump dir per (OBJ,SIZE) => resubmitting a preempted job RESUMES from checkpoint.
+request_cpus   = 32
+request_gpus   = 8
+request_memory = 256G
+request_disk   = 200G
+# Prefer A100-80GB; allow H100-80GB as fallback (both fit 400M@seq1024). Leaner
+# cpu/mem so the node resource-balance START clause doesn't exclude free nodes.
+requirements   = (CUDADeviceName == "NVIDIA A100-SXM4-80GB" || CUDADeviceName == "NVIDIA H100 80GB HBM3")
+
+# OBJ/SIZE/MAX_STEPS optional (-a MAX_STEPS=...). Empty -> train.sh defaults.
+environment = "OBJ=$(OBJ) SIZE=$(SIZE) MAX_STEPS=$(MAX_STEPS) BLOCK_SIZE=$(BLOCK_SIZE)"
+
+log_root = /fast/pmayilvahanan/condor_logs/diffusion_match/train_$(OBJ)_$(SIZE)_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 172800
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/diffusion_match/train.sh
+getenv = True
+
+queue 1

@@ -1,0 +1,24 @@
+# Standalone FineWeb-Edu cloze + upstream-NLL eval for an EXISTING checkpoint.
+# EvalArgs-shaped (top-level harness/validation/generator) -- unlike the train yaml,
+# which nests these under `eval:`. Used by scripts/widen_line/fineweb_eval.sh to backfill
+# per-checkpoint eval points for an arch whose in-training evals were lost (e.g. tokenformer,
+# whose early evals crashed on the old consolidation bug). Mirrors the train yaml's
+# eval.harness / eval.validation / eval.generator so the points are comparable.
+name: widen_b_eval
+harness:
+  tasks:
+    - hellaswag
+    - piqa
+    - winogrande
+    - arc_easy
+    - arc_challenge
+    - openbookqa
+    - lambada_openai
+validation:
+  use_val_from_train_src: false
+  max_steps: 1000
+  root_dir: /fast/pmayilvahanan/lm_datasets/
+  sources: []          # only the checkpoint's train source (fineweb) *.val.jsonl is used
+generator:
+  max_tokens: 16384
+  dtype: bf16

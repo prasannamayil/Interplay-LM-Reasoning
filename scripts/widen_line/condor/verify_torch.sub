@@ -1,0 +1,14 @@
+request_cpus = 4
+request_gpus = 1
+request_memory = 32G
+request_disk = 10G
+requirements = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+log_root = /fast/pmayilvahanan/condor_logs/widen/verify_torch_$(ClusterId)
+error = $(log_root).err
+output = $(log_root).out
+log = $(log_root).log
+MaxTime = 600
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/verify_torch.sh
+getenv = True
+queue 1

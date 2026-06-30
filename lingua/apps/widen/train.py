@@ -310,6 +310,11 @@ def train(args: TrainArgs):
 
         checkpoint = CheckpointManager.instantiate_and_make_dir(args.checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
+        # dcp.load can leave large temporary GPU buffers cached by the allocator. For the big
+        # MoE optimizer state on RESUME this pushed peak memory over 80GB at the first training
+        # step -> CUDA OOM (moe trained 0->2000 fine from scratch at ~79% mem, but every resume
+        # OOM'd). Return the cached load-time blocks to the device so the first step has headroom.
+        torch.cuda.empty_cache()
         # Either load from latest checkpoint or start from scratch
         if args.probe_freq is not None:
             if get_is_master():
@@ -429,13 +434,30 @@ def train(args: TrainArgs):
             # optimizer step
             grad_norm = -1.0
             if train_state.acc_step == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=args.optim.clip, foreach=True
-                )
-
-                grad_norm = (
-                    grad_norm.full_tensor() if isinstance(grad_norm, DTensor) else grad_norm
-                ).item()
+                # Manual grad clipping on local tensors to avoid the PyTorch 2.6
+                # DTensor all_reduce bug in clip_grad_norm_ ("get_group_info: no
+                # group info associated with the group name") on FSDP shards.
+                # Mirrors apps/mamba/train.py (proven on multi-GPU). all_reduce(MAX)
+                # gives every rank the same clip_coef (consistent scaling of shards).
+                max_norm = float(args.optim.clip)
+                local_grads = [
+                    p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
+                    for p in model.parameters()
+                    if p.grad is not None
+                ]
+                if local_grads:
+                    total_norm = torch.norm(
+                        torch.stack([torch.norm(g.detach(), 2) for g in local_grads]), 2
+                    )
+                    torch.distributed.all_reduce(
+                        total_norm, op=torch.distributed.ReduceOp.MAX
+                    )
+                    clip_coef = torch.clamp(max_norm / (total_norm + 1e-6), max=1.0)
+                    for g in local_grads:
+                        g.mul_(clip_coef)
+                    grad_norm = total_norm.item()
+                else:
+                    grad_norm = 0.0
 
                 optimizer.step()
                 scheduler.step()

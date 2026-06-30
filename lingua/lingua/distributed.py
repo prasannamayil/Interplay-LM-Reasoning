@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from functools import lru_cache, partial, reduce
 from typing import List, Optional, Tuple, Union
 
@@ -276,7 +277,16 @@ def setup_torch_distributed(dist_args):
     )
     if torch.cuda.device_count() > 1:
         torch.cuda.set_device(local_rank)
-    torch.distributed.init_process_group(init_method="env://", backend="nccl")
+    # Default NCCL watchdog timeout is 600s. The in-training eval consolidates a checkpoint
+    # on rank 0 ONLY (read sharded distcp -> write a single .pth) while ranks 1..N-1 idle on a
+    # pending collective; for the big MoE checkpoint on slow lustre this consolidation exceeds
+    # 600s, so the other ranks' watchdog times out and KILLS the run (observed at the moe
+    # step-2000 eval: "Watchdog caught collective operation timeout ... ran for 600075 ms").
+    # Use a generous 2h timeout so slow rank-0 consolidation can't trip the watchdog. (Also
+    # fixes the same race in the standalone fineweb eval.)
+    torch.distributed.init_process_group(
+        init_method="env://", backend="nccl", timeout=timedelta(hours=2)
+    )
     torch.autograd.set_detect_anomaly(dist_args.detect_anomaly)
 
 

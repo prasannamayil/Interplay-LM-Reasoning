@@ -1,0 +1,21 @@
+# 2-GPU full_shard smoke for the NEW widen archs (parallel/diff/gla/mla/mamba2/fastrnn).
+# Validates construction + init_weights + a forward/backward + checkpoint at dim=512,
+# 26 layers, before committing 8-GPU nodes. Reuses fineweb_smoke_mgpu.sh (honours ARCH).
+# fastrnn additionally needs `accelerated_scan` in the gsm_pretrain venv; if it is not
+# installed that arch's smoke will fail at the lazy import (documented prerequisite).
+request_cpus = 16
+request_gpus = 2
+request_memory = 128G
+request_disk = 40G
+requirements = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+environment = "ARCH=$(ARCH)"
+log_root = /fast/pmayilvahanan/condor_logs/widen/arch_smoke_$(ARCH)_$(ClusterId)
+error = $(log_root).err
+output = $(log_root).out
+log = $(log_root).log
+MaxTime = 1800
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/fineweb_smoke_mgpu.sh
+getenv = True
+queue ARCH in (parallel diff gla mla mamba2 fastrnn)

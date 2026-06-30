@@ -1,0 +1,19 @@
+# CPU job: salvage the interrupted seq1024 dataset (synthesize state.json etc.).
+# Submit: condor_submit_bid 40 scripts/diffusion_match/condor/repair_dataset.sub
+request_cpus   = 8
+request_memory = 64G
+request_disk   = 20G
+
+log_root = /fast/pmayilvahanan/condor_logs/diffusion_match/repair_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 7200
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/diffusion_match/repair_dataset.sh
+getenv = True
+
+queue 1

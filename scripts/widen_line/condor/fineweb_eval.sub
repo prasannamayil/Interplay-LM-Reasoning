@@ -1,0 +1,23 @@
+# Standalone FineWeb eval: backfill per-checkpoint eval points for one arch.
+# Submit:  condor_submit_bid 40 -a ARCH=tokenformer scripts/widen_line/condor/fineweb_eval.sub
+request_cpus   = 64
+request_gpus   = 8
+request_memory = 512G
+request_disk   = 200G
+requirements   = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+
+environment = "ARCH=$(ARCH)"
+
+log_root = /fast/pmayilvahanan/condor_logs/widen/fineweb_eval_$(ARCH)_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 86400
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/fineweb_eval.sh
+getenv = True
+
+queue 1

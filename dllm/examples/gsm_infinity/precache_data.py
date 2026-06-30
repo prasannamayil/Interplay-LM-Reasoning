@@ -81,6 +81,13 @@ def main():
     parser.add_argument("--token_budget", type=str, default="10B")
     parser.add_argument("--op_min", type=int, default=2)
     parser.add_argument("--op_max", type=int, default=10)
+    parser.add_argument("--op_weights", type=str, default=None,
+                        help="Comma-separated per-op token fractions, e.g. "
+                             "'2:0.0667,3:0.0667,...,10:0.1667'. When set, "
+                             "per_op_budget = token_budget * weight[op] (overrides "
+                             "the default uniform budget/num_ops). Used to build the "
+                             "HARD-skewed mix (op2-4=0.2 / op5-7=0.3 / op8-10=0.5) that "
+                             "matches the widen-line AR data.")
     parser.add_argument("--seq_length", type=int, default=2048)
     parser.add_argument("--test_split_size", type=int, default=5000)
     parser.add_argument("--num_proc", type=int, default=64)
@@ -98,17 +105,31 @@ def main():
     if args.no_pack and args.pack_masked:
         parser.error("--no_pack and --pack_masked are mutually exclusive")
 
-    if os.path.isfile(os.path.join(args.output_dir, "dataset_dict.json")):
-        print(f"Output already exists at {args.output_dir}, skipping.")
+    # Completion marker = the per-split state.json (written LAST by save_to_disk),
+    # NOT dataset_dict.json (written early). Checking dataset_dict.json caused a
+    # restart after an evicted save to false-skip and leave a corrupt dataset.
+    if os.path.isfile(os.path.join(args.output_dir, "train", "state.json")):
+        print(f"Output already complete at {args.output_dir}, skipping.")
         return
 
     t0 = time.time()
     budget = _readable2int(args.token_budget)
     num_ops = args.op_max - args.op_min + 1
 
+    op_weights = None
+    if args.op_weights:
+        op_weights = {}
+        for kv in args.op_weights.split(","):
+            k, v = kv.split(":")
+            op_weights[int(k)] = float(v)
+
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
     print(f"Tokenizer: vocab_size={tokenizer.vocab_size}, eos={tokenizer.eos_token}")
-    print(f"Token budget: {args.token_budget}, ops {args.op_min}-{args.op_max} (uniform)")
+    if op_weights is not None:
+        print(f"Token budget: {args.token_budget}, ops {args.op_min}-{args.op_max} "
+              f"(WEIGHTED: {op_weights})")
+    else:
+        print(f"Token budget: {args.token_budget}, ops {args.op_min}-{args.op_max} (uniform)")
 
     full_files = []
     remainder_info = []
@@ -121,7 +142,12 @@ def main():
         if budget is None or not shard_paths:
             full_files.extend(shard_paths)
             continue
-        per_op_budget = budget / num_ops
+        if op_weights is not None:
+            per_op_budget = budget * op_weights.get(op, 0.0)
+            if per_op_budget <= 0:
+                continue
+        else:
+            per_op_budget = budget / num_ops
         file_size_str = shard_files[0].split(".")[0].split("_")[-1]
         file_size = _readable2int(file_size_str)
         max_full = int(per_op_budget // file_size)

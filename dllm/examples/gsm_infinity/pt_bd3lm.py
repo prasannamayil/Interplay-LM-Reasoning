@@ -490,7 +490,15 @@ def train():
             ),
         ),
     )
-    trainer.train()
+    # Resume from the last checkpoint in output_dir if present (survives Condor
+    # preemption without restarting from step 0).
+    last_ckpt = None
+    if os.path.isdir(training_args.output_dir):
+        from transformers.trainer_utils import get_last_checkpoint
+        last_ckpt = get_last_checkpoint(training_args.output_dir)
+        if last_ckpt is not None:
+            logger.info(f"Resuming from checkpoint {last_ckpt}")
+    trainer.train(resume_from_checkpoint=last_ckpt)
     trainer.save_model(os.path.join(training_args.output_dir, "checkpoint-final"))
     trainer.processing_class.save_pretrained(
         os.path.join(training_args.output_dir, "checkpoint-final")

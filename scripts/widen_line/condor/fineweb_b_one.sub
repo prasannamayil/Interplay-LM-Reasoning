@@ -7,7 +7,8 @@ request_memory = 512G
 request_disk   = 200G
 requirements   = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
 
-environment = "ARCH=$(ARCH)"
+# CKPT_EVERY optional (-a CKPT_EVERY=250). Empty when unset -> script defaults to 1000.
+environment = "ARCH=$(ARCH) CKPT_EVERY=$(CKPT_EVERY)"
 
 log_root = /fast/pmayilvahanan/condor_logs/widen/fineweb_b_$(ARCH)_$(ClusterId)
 error    = $(log_root).err

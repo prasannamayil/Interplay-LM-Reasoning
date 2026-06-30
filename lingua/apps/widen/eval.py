@@ -11,6 +11,7 @@ from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from typing import Any, List, Optional, Tuple, Union
 from lm_eval import simple_evaluate
+from lm_eval.utils import handle_non_serializable
 from omegaconf import OmegaConf
 import torch
 from apps.widen.generate import (
@@ -227,7 +228,13 @@ def launch_eval(cfg: EvalArgs):
         consolidate_path = Path(cfg.ckpt_dir)
     else:
         consolidate_path = Path(cfg.ckpt_dir) / CONSOLIDATE_FOLDER
-        if not consolidate_path.exists() and get_global_rank() == 0:
+        # Re-consolidate if the consolidated dir is MISSING *or PARTIAL* (params.json absent):
+        # a preemption mid-consolidation can leave consolidated.pth without params.json, and
+        # the old `not exists` check would then skip re-consolidation and crash the load.
+        if not (consolidate_path / "params.json").exists() and get_global_rank() == 0:
+            import shutil
+            if consolidate_path.exists():
+                shutil.rmtree(consolidate_path, ignore_errors=True)  # drop partial
             consolidate_path = consolidate_checkpoints(cfg.ckpt_dir)
 
     Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True)
@@ -252,11 +259,14 @@ def launch_eval(cfg: EvalArgs):
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
-            f.write(json.dumps(results))
+            # lm-eval's simple_evaluate returns config entries that hold callables
+            # (aggregation fns) -> not JSON serializable. Use lm-eval's own fallback
+            # (stringifies unknowns) instead of crashing the in-training eval.
+            f.write(json.dumps(results, default=handle_non_serializable))
         logger.info(f"All evaluation results: {results['results']}")
         if val_results is not None:
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
-                f.write(json.dumps(val_results))
+                f.write(json.dumps(val_results, default=handle_non_serializable))
             logger.info(f"All validation results: {val_results}")
     if cfg.metric_log_dir and get_global_rank() == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
@@ -268,7 +278,7 @@ def launch_eval(cfg: EvalArgs):
         if cfg.global_step is not None:
             timestamp["global_step"] = cfg.global_step
         print(
-            json.dumps(timestamp | results["results"]),
+            json.dumps(timestamp | results["results"], default=handle_non_serializable),
             file=open(metric_log_path, mode="a"),
             flush=True,
         )
@@ -276,7 +286,7 @@ def launch_eval(cfg: EvalArgs):
         val_log_path = Path(cfg.metric_log_dir) / "metrics.validation.jsonl"
         if val_results is not None:
             print(
-                json.dumps(timestamp | val_results),
+                json.dumps(timestamp | val_results, default=handle_non_serializable),
                 file=open(val_log_path, mode="a"),
                 flush=True,
             )

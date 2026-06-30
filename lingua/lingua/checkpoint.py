@@ -207,6 +207,22 @@ class CheckpointManager:
         model_sd, optim_sd = get_state_dict(model, optimizer)
         return {"model": model_sd, "optim": optim_sd}
 
+    def _dcp_pg(self):
+        # DCP coordinates its save/load PLAN via scatter_object_list, which moves a pickled
+        # SavePlan over the process group. For MoE (hundreds of expert tensors across many
+        # FSDP-sharded layers) that plan object is large and the NCCL object-scatter throws
+        # "NCCL Error 2: unhandled system error" -> the 8-GPU MoE save never completed (it
+        # crashed reproducibly on multiple nodes; smaller-state-dict archs were unaffected).
+        # Route ONLY these metadata collectives over a cached gloo (CPU) group. The actual
+        # tensor bytes are written by the storage writer to disk, NOT over the PG, so this is
+        # safe and cheap for every arch. Created lazily + collectively (all ranks hit save/
+        # load together). Returns None for single-process (no distributed) -> DCP default.
+        if not dist.is_initialized() or dist.get_world_size() == 1:
+            return None
+        if getattr(self, "_dcp_gloo_pg", None) is None:
+            self._dcp_gloo_pg = dist.new_group(backend="gloo")
+        return self._dcp_gloo_pg
+
     def save(
         self,
         model,
@@ -226,7 +242,7 @@ class CheckpointManager:
 
         logger.info("Saving...")
         state_dict = self.get_state_dict(model, optimizer)
-        dcp.save(state_dict, checkpoint_id=curr_save_dir)
+        dcp.save(state_dict, checkpoint_id=curr_save_dir, process_group=self._dcp_pg())
         logger.info("State dict saved!")
 
         if dist.is_initialized():
@@ -288,7 +304,7 @@ class CheckpointManager:
             model=model,
             optimizer=optimizer,
         )
-        dcp.load(state_dict, checkpoint_id=path)
+        dcp.load(state_dict, checkpoint_id=path, process_group=self._dcp_pg())
         logger.info("Model and optim reloaded")
     
     @classmethod

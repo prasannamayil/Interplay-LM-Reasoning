@@ -1,0 +1,18 @@
+# Exp1/Currency1 full: 8 GPUs (A100-80GB single node), left_to_right diffusion re-eval
+request_cpus   = 16
+request_gpus   = 8
+request_memory = 350G
+request_disk   = 60G
+requirements   = (CUDADeviceName == "NVIDIA A100-SXM4-80GB")
+
+log_root = /fast/pmayilvahanan/condor_logs/reeval_ltr/full_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 43200
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/finetune/condor/reeval_ltr_full.sh
+getenv = True
+queue 1

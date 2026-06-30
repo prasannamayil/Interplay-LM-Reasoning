@@ -1,0 +1,28 @@
+# Experiment B FineWeb widen-line, ONE 8-GPU job per arch, on H100 (80GB) nodes.
+# Variant of fineweb_b_one.sub that targets the H100 pool instead of A100-SXM4-80GB.
+# Used for moe after repeated A100 resume failures (NCCL-init OOM on memory-contended A100
+# nodes); the H100 pool is larger/separate -> better chance of a clean node. Same 80GB so
+# the batch config is unchanged. Submit:
+#   condor_submit_bid 40 -a ARCH=moe -a CKPT_EVERY=1000 scripts/widen_line/condor/fineweb_b_one_h100.sub
+request_cpus   = 64
+request_gpus   = 8
+request_memory = 512G
+request_disk   = 200G
+requirements   = regexp("H100", CUDADeviceName)
+
+# CKPT_EVERY optional (-a CKPT_EVERY=1000). Empty when unset -> script defaults to 1000.
+environment = "ARCH=$(ARCH) CKPT_EVERY=$(CKPT_EVERY)"
+
+log_root = /fast/pmayilvahanan/condor_logs/widen/fineweb_b_$(ARCH)_h100_$(ClusterId)
+error    = $(log_root).err
+output   = $(log_root).out
+log      = $(log_root).log
+
+MaxTime = 172800
+periodic_remove = (JobStatus =?= 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_release = (JobStatus =?= 5) && (HoldReasonCode =?= 34) && (NumJobStarts < 10)
+
+executable = /lustre/fast/fast/pmayilvahanan/Interplay-LM-Reasoning/scripts/widen_line/fineweb_run.sh
+getenv = True
+
+queue 1
